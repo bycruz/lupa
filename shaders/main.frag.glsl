@@ -32,8 +32,14 @@ layout(set = 0, binding = 4) uniform TextureScales {
 };
 
 void main() {
-    vec2 uvScale = u_uvScales[int(v_textureIndex)];
-    vec4 texColor = texture(sampler2DArray(u_textures, u_sampler), vec3(v_uv * uvScale, v_textureIndex)) * v_color;
+    // vec4 texColor = texture(sampler2DArray(u_textures, u_sampler), vec3(v_uv * uvScale, v_textureIndex)) * v_color;
+    vec4 texColor;
+    if (v_textureIndex < 0.0) {
+        texColor = v_color;
+    } else {
+        vec2 uvScale = u_uvScales[int(v_textureIndex)];
+        texColor = texture(sampler2DArray(u_textures, u_sampler), vec3(v_uv * uvScale, v_textureIndex)) * v_color;
+    }
 
     if (u_lightEnabled < 0.5) {
         out_color = texColor;

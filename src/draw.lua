@@ -29,7 +29,8 @@ local packageDir = debug.getinfo(1, "S").source:sub(2)
 ---@field private vertices ffi.cdata*
 ---@field private indices ffi.cdata*
 ---@field private encoder hood.CommandEncoder?
----@field private color { r: number, g: number, b: number, a?: number }
+---@field private curColor { r: number, g: number, b: number, a?: number }
+---@field private curTexture number
 local Draw = {}
 Draw.__index = Draw
 
@@ -53,7 +54,25 @@ ffi.cdef [[
         LupaMat4 viewProj;
         LupaMat4 model;
     } LupaTransforms;
+
+    typedef struct {
+        float lightDir[3];
+        float lightEnabled;
+        float lightColor[3];
+        float _pad0;
+        float ambientColor[3];
+        float _pad1;
+        float cameraPos[3];
+        float _pad2;
+    } LupaLighting;
 ]]
+
+---@class lupa.draw.ffi.Lighting: ffi.cdata*
+---@field lightDir number[]
+---@field lightEnabled number
+---@field lightColor number[]
+---@field ambientColor number[]
+---@field cameraPos number[]
 
 ---@type fun(count: number): ffi.cdata*
 local VertexArray = ffi.typeof("LupaVertex[?]")
@@ -66,6 +85,10 @@ local IndexArraySize = ffi.sizeof("uint16_t")
 ---@type fun(proj: lupa.math.Mat4, model: lupa.math.Mat4): ffi.cdata*
 local Transforms = ffi.typeof("LupaTransforms")
 local TransformsSize = ffi.sizeof("LupaTransforms")
+
+---@type fun(): lupa.draw.ffi.Lighting
+local Lighting = ffi.typeof("LupaLighting")
+local LightingSize = ffi.sizeof("LupaLighting")
 
 ---@param window winit.Window
 function Draw.new(window)
@@ -237,7 +260,8 @@ function Draw.new(window)
 		uvScalesBuffer = uvScalesBuffer,
 		vertices = VertexArray(MAX_VERTICES),
 		indices = IndexArray(MAX_INDICES),
-		color = { r = 1, g = 1, b = 1, a = 1 },
+		curColor = { r = 1, g = 1, b = 1, a = 1 },
+		curTexture = -1 -- No texture by default
 	}, Draw)
 end
 
@@ -253,7 +277,7 @@ end
 ---@param g number
 ---@param b number
 ---@param a number
----@param texIndex number
+---@param texIndex number?
 ---@private
 function Draw:pushVertex(x, y, z, u, _v, nx, ny, nz, r, g, b, a, texIndex)
 	local v = self.vertices[self.vertexCount]
@@ -261,7 +285,7 @@ function Draw:pushVertex(x, y, z, u, _v, nx, ny, nz, r, g, b, a, texIndex)
 	v.u, v.v = u, _v
 	v.nx, v.ny, v.nz = nx, ny, nz
 	v.r, v.g, v.b, v.a = r, g, b, a
-	v.textureIndex = texIndex
+	v.textureIndex = texIndex or self.curTexture
 
 	self.vertexCount = self.vertexCount + 1
 end
@@ -278,7 +302,7 @@ end
 ---@param b number
 ---@param a number?
 function Draw:setColor(r, g, b, a)
-	self.color = { r = r, g = g, b = b, a = a or 1.0 }
+	self.curColor = { r = r, g = g, b = b, a = a or 1.0 }
 end
 
 ---@param x number
@@ -287,12 +311,12 @@ end
 ---@param h number
 function Draw:rect(x, y, w, h)
 	local i = self.vertexCount
-	local r, g, b, a = self.color.r, self.color.g, self.color.b, self.color.a or 1.0
+	local r, g, b, a = self.curColor.r, self.curColor.g, self.curColor.b, self.curColor.a or 1.0
 
-	self:pushVertex(x, y, 0, 0, 0, 0, 0, 1, r, g, b, a, 0)
-	self:pushVertex(x + w, y, 0, 1, 0, 0, 0, 1, r, g, b, a, 0)
-	self:pushVertex(x, y + h, 0, 0, 1, 0, 0, 1, r, g, b, a, 0)
-	self:pushVertex(x + w, y + h, 0, 1, 1, 0, 0, 1, r, g, b, a, 0)
+	self:pushVertex(x, y, 0, 0, 0, 0, 0, 1, r, g, b, a)
+	self:pushVertex(x + w, y, 0, 1, 0, 0, 0, 1, r, g, b, a)
+	self:pushVertex(x, y + h, 0, 0, 1, 0, 0, 1, r, g, b, a)
+	self:pushVertex(x + w, y + h, 0, 1, 1, 0, 0, 1, r, g, b, a)
 
 	self:pushIndex(i)
 	self:pushIndex(i + 1)
@@ -313,12 +337,16 @@ end
 
 ---@private
 function Draw:endFrame()
-	local proj = lpmath.mat4.ortho(0, self.window.width, self.window.height, 0, -1, 1)
+	local proj = lpmath.mat4.ortho(0, self.window.width, 0, self.window.height, -1, 1)
 	local model = lpmath.mat4.identity()
 	local transforms = Transforms(proj, model)
 
+	local lighting = Lighting()
+	lighting.lightEnabled = 0.0
+
 	local encoder = self.device:createCommandEncoder()
 	encoder:writeBuffer(self.transformsBuffer, TransformsSize, transforms)
+	encoder:writeBuffer(self.lightingBuffer, LightingSize, lighting)
 	encoder:writeBuffer(self.vertexBuffer, VertexArraySize * self.vertexCount, self.vertices)
 	encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
 	encoder:beginRendering({
