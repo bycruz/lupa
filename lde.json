@@ -1,0 +1,8 @@
+{
+	"name": "lupa",
+	"version": "0.1.0",
+	"dependencies": {
+		"hood": { "git": "https://github.com/bycruz/hood" },
+		"winit": { "git": "https://github.com/bycruz/winit" }
+	}
+}

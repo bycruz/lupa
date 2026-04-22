@@ -97,7 +97,7 @@ function Draw.new(window)
 	local device = adapter:requestDevice()
 
 	local surface = instance:createSurface(window)
-	local swapchain = surface:configure(device, { presentMode = "fifo" })
+	local swapchain = surface:configure(device, { presentMode = "immediate" })
 
 	local vertexLayout = hood.VertexLayout.new()
 		:withAttribute({ type = "f32", size = 3, offset = 0 }) -- position
@@ -138,7 +138,7 @@ function Draw.new(window)
 		mipmapFilter = "linear",
 		addressModeU = "repeat",
 		addressModeV = "repeat",
-		addressModeW = "repeat",
+		addressModeW = "repeat"
 	})
 
 	local uvScalesBuffer = device:createBuffer({
@@ -180,27 +180,27 @@ function Draw.new(window)
 			{
 				binding = 0,
 				type = "buffer",
-				buffer = transformsBuffer,
+				buffer = transformsBuffer
 			},
 			{
 				binding = 1,
 				type = "buffer",
-				buffer = lightingBuffer,
+				buffer = lightingBuffer
 			},
 			{
 				binding = 2,
 				type = "texture",
-				texture = texture:createView({}),
+				texture = texture:createView({})
 			},
 			{
 				binding = 3,
 				type = "sampler",
-				sampler = sampler,
+				sampler = sampler
 			},
 			{
 				binding = 4,
 				type = "buffer",
-				buffer = uvScalesBuffer,
+				buffer = uvScalesBuffer
 			}
 		}
 	})
@@ -235,7 +235,7 @@ function Draw.new(window)
 	local depthBuffer = device:createTexture({
 		extents = { dim = "2d", width = window.width, height = window.height },
 		format = "depth24plus",
-		usages = { "RENDER_ATTACHMENT" },
+		usages = { "RENDER_ATTACHMENT" }
 	})
 
 	local depthBufferView = depthBuffer:createView({})
@@ -344,6 +344,12 @@ function Draw:endFrame()
 	local lighting = Lighting()
 	lighting.lightEnabled = 0.0
 
+	local texture = self.swapchain:getCurrentTexture()
+	if not texture then
+		-- todo: recreate swapchain
+		return
+	end
+
 	local encoder = self.device:createCommandEncoder()
 	encoder:writeBuffer(self.transformsBuffer, TransformsSize, transforms)
 	encoder:writeBuffer(self.lightingBuffer, LightingSize, lighting)
@@ -354,14 +360,14 @@ function Draw:endFrame()
 			{
 				op = {
 					type = "clear",
-					color = { r = 0.1, g = 0.1, b = 0.1, a = 1.0 },
+					color = { r = 0.1, g = 0.1, b = 0.1, a = 1.0 }
 				},
-				texture = self.swapchain:getCurrentTexture():createView({}),
-			},
+				texture = texture:createView({})
+			}
 		},
 		depthStencilAttachment = {
 			op = { type = "clear", depth = 1 },
-			texture = self.depthBufferView,
+			texture = self.depthBufferView
 		}
 	})
 	encoder:setPipeline(self.pipeline)
