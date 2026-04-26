@@ -29,8 +29,14 @@ local packageDir = debug.getinfo(1, "S").source:sub(2)
 ---@field private vertices ffi.cdata*
 ---@field private indices ffi.cdata*
 ---@field private encoder hood.CommandEncoder?
----@field private curColor { r: number, g: number, b: number, a?: number }
+---@field private curR number
+---@field private curG number
+---@field private curB number
+---@field private curA number
 ---@field private curTexture number
+---@field private transforms ffi.cdata*
+---@field private lighting ffi.cdata*
+---@field private identityModel lupa.math.Mat4
 local Draw = {}
 Draw.__index = Draw
 
@@ -260,8 +266,11 @@ function Draw.new(window)
 		uvScalesBuffer = uvScalesBuffer,
 		vertices = VertexArray(MAX_VERTICES),
 		indices = IndexArray(MAX_INDICES),
-		curColor = { r = 1, g = 1, b = 1, a = 1 },
-		curTexture = -1 -- No texture by default
+		curR = 1, curG = 1, curB = 1, curA = 1,
+		curTexture = -1,
+		transforms = Transforms(),
+		lighting = Lighting(),
+		identityModel = lpmath.mat4.identity()
 	}, Draw)
 end
 
@@ -302,7 +311,7 @@ end
 ---@param b number
 ---@param a number?
 function Draw:setColor(r, g, b, a)
-	self.curColor = { r = r, g = g, b = b, a = a or 1.0 }
+	self.curR = r; self.curG = g; self.curB = b; self.curA = a or 1.0
 end
 
 ---@param x number
@@ -310,20 +319,50 @@ end
 ---@param w number
 ---@param h number
 function Draw:rect(x, y, w, h)
-	local i = self.vertexCount
-	local r, g, b, a = self.curColor.r, self.curColor.g, self.curColor.b, self.curColor.a or 1.0
+	local verts = self.vertices
+	local idxs  = self.indices
+	local vc    = self.vertexCount
+	local ic    = self.indexCount
+	local r, g, b, a = self.curR, self.curG, self.curB, self.curA
+	local tex   = self.curTexture
 
-	self:pushVertex(x, y, 0, 0, 0, 0, 0, 1, r, g, b, a)
-	self:pushVertex(x + w, y, 0, 1, 0, 0, 0, 1, r, g, b, a)
-	self:pushVertex(x, y + h, 0, 0, 1, 0, 0, 1, r, g, b, a)
-	self:pushVertex(x + w, y + h, 0, 1, 1, 0, 0, 1, r, g, b, a)
+	local v = verts[vc]
+	v.x, v.y, v.z = x, y, 0
+	v.u, v.v = 0, 0
+	v.nx, v.ny, v.nz = 0, 0, 1
+	v.r, v.g, v.b, v.a = r, g, b, a
+	v.textureIndex = tex
 
-	self:pushIndex(i)
-	self:pushIndex(i + 1)
-	self:pushIndex(i + 2)
-	self:pushIndex(i + 1)
-	self:pushIndex(i + 3)
-	self:pushIndex(i + 2)
+	v = verts[vc + 1]
+	v.x, v.y, v.z = x + w, y, 0
+	v.u, v.v = 1, 0
+	v.nx, v.ny, v.nz = 0, 0, 1
+	v.r, v.g, v.b, v.a = r, g, b, a
+	v.textureIndex = tex
+
+	v = verts[vc + 2]
+	v.x, v.y, v.z = x, y + h, 0
+	v.u, v.v = 0, 1
+	v.nx, v.ny, v.nz = 0, 0, 1
+	v.r, v.g, v.b, v.a = r, g, b, a
+	v.textureIndex = tex
+
+	v = verts[vc + 3]
+	v.x, v.y, v.z = x + w, y + h, 0
+	v.u, v.v = 1, 1
+	v.nx, v.ny, v.nz = 0, 0, 1
+	v.r, v.g, v.b, v.a = r, g, b, a
+	v.textureIndex = tex
+
+	idxs[ic]     = vc
+	idxs[ic + 1] = vc + 1
+	idxs[ic + 2] = vc + 2
+	idxs[ic + 3] = vc + 1
+	idxs[ic + 4] = vc + 3
+	idxs[ic + 5] = vc + 2
+
+	self.vertexCount = vc + 4
+	self.indexCount  = ic + 6
 end
 
 function Draw:line()
@@ -338,10 +377,11 @@ end
 ---@private
 function Draw:endFrame()
 	local proj = lpmath.mat4.ortho(0, self.window.width, 0, self.window.height, -1, 1)
-	local model = lpmath.mat4.identity()
-	local transforms = Transforms(proj, model)
+	local transforms = self.transforms
+	transforms.viewProj = proj
+	transforms.model = self.identityModel
 
-	local lighting = Lighting()
+	local lighting = self.lighting
 	lighting.lightEnabled = 0.0
 
 	local texture = self.swapchain:getCurrentTexture()
