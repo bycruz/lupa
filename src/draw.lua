@@ -149,12 +149,12 @@ function Draw.new(window)
 	local bindGroupLayout = device:createBindGroupLayout({
 		{ -- Transforms
 			binding = 0,
-			type = "buffer",
+			type = "uniform-buffer",
 			visibility = { "FRAGMENT", "VERTEX" }
 		},
 		{ -- Lighting
 			binding = 1,
-			type = "buffer",
+			type = "uniform-buffer",
 			visibility = { "FRAGMENT" }
 		},
 		{ -- Texture
@@ -169,7 +169,7 @@ function Draw.new(window)
 		},
 		{ -- UV Scales
 			binding = 4,
-			type = "buffer",
+			type = "uniform-buffer",
 			visibility = { "FRAGMENT" }
 		}
 	})
@@ -179,12 +179,12 @@ function Draw.new(window)
 		entries = {
 			{
 				binding = 0,
-				type = "buffer",
+				type = "uniform-buffer",
 				buffer = transformsBuffer
 			},
 			{
 				binding = 1,
-				type = "buffer",
+				type = "uniform-buffer",
 				buffer = lightingBuffer
 			},
 			{
@@ -199,7 +199,7 @@ function Draw.new(window)
 			},
 			{
 				binding = 4,
-				type = "buffer",
+				type = "uniform-buffer",
 				buffer = uvScalesBuffer
 			}
 		}
