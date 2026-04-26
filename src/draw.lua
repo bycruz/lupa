@@ -37,6 +37,8 @@ local packageDir = debug.getinfo(1, "S").source:sub(2)
 ---@field private transforms ffi.cdata*
 ---@field private lighting ffi.cdata*
 ---@field private identityModel lupa.math.Mat4
+---@field private renderDesc table
+---@field private emptyViewDesc table
 local Draw = {}
 Draw.__index = Draw
 
@@ -270,7 +272,20 @@ function Draw.new(window)
 		curTexture = -1,
 		transforms = Transforms(),
 		lighting = Lighting(),
-		identityModel = lpmath.mat4.identity()
+		identityModel = lpmath.mat4.identity(),
+		emptyViewDesc = {},
+		renderDesc = {
+			colorAttachments = {
+				{
+					op = { type = "clear", color = { r = 0.1, g = 0.1, b = 0.1, a = 1.0 } },
+					texture = false -- replaced each frame
+				}
+			},
+			depthStencilAttachment = {
+				op = { type = "clear", depth = 1 },
+				texture = depthBufferView
+			}
+		}
 	}, Draw)
 end
 
@@ -395,21 +410,9 @@ function Draw:endFrame()
 	encoder:writeBuffer(self.lightingBuffer, LightingSize, lighting)
 	encoder:writeBuffer(self.vertexBuffer, VertexArraySize * self.vertexCount, self.vertices)
 	encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
-	encoder:beginRendering({
-		colorAttachments = {
-			{
-				op = {
-					type = "clear",
-					color = { r = 0.1, g = 0.1, b = 0.1, a = 1.0 }
-				},
-				texture = texture:createView({})
-			}
-		},
-		depthStencilAttachment = {
-			op = { type = "clear", depth = 1 },
-			texture = self.depthBufferView
-		}
-	})
+	local renderDesc = self.renderDesc
+	renderDesc.colorAttachments[1].texture = texture:createView(self.emptyViewDesc)
+	encoder:beginRendering(renderDesc)
 	encoder:setPipeline(self.pipeline)
 	encoder:setBindGroup(0, self.bindGroup)
 	encoder:setViewport(0, 0, self.window.width, self.window.height)
