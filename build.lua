@@ -28,27 +28,49 @@ local function exists(path)
 	return false
 end
 
-local inputVertex = packageSourceDir .. "/shaders/main.vert.glsl"
-local outputVertex = packageSourceDir .. "/shaders/main.vert.spv"
-if not exists(outputVertex) then
-	print("SPIR-V vertex shader not found, compiling GLSL to SPIR-V...")
-	glslToSpirv("vert", inputVertex, outputVertex)
+---@param spvPath string
+---@param luaPath string
+local function spirvToLua(spvPath, luaPath)
+	local f = assert(io.open(spvPath, "rb"))
+	local data = f:read("*a")
+	f:close()
+
+	local escaped = data:gsub(".", function(c)
+		return string.format("\\%d", c:byte())
+	end)
+
+	local out = assert(io.open(luaPath, "w"))
+	out:write('return "' .. escaped .. '"\n')
+	out:close()
 end
 
-local inputFragment = packageSourceDir .. "/shaders/main.frag.glsl"
-local outputFragment = packageSourceDir .. "/shaders/main.frag.spv"
-if not exists(outputFragment) then
-	print("SPIR-V fragment shader not found, compiling GLSL to SPIR-V...")
-	glslToSpirv("frag", inputFragment, outputFragment)
-end
-
--- Symlink source /shaders/ dir into target output dir
-
-local targetShaderDir = outputDir .. "/shaders"
-if not exists(targetShaderDir) then
+---@param path string
+local function mkdir(path)
 	if jit.os == "Windows" then
-		os.execute(string.format('mklink /J "%s" "%s"', targetShaderDir, packageSourceDir .. "/shaders"))
+		os.execute(string.format('mkdir "%s"', path))
 	else
-		os.execute(string.format("ln -s %s %s", packageSourceDir .. "/shaders", targetShaderDir))
+		os.execute(string.format("mkdir -p '%s'", path))
 	end
+end
+
+local shaders = {
+	{ name = "main", stage = "vert" },
+	{ name = "main", stage = "frag" },
+}
+
+for _, shader in ipairs(shaders) do
+	local glslPath = string.format("%s/shaders/%s.%s.glsl", packageSourceDir, shader.name, shader.stage)
+	local spvPath = string.format("%s/shaders/%s.%s.spv", packageSourceDir, shader.name, shader.stage)
+
+	if not exists(spvPath) then
+		print(string.format("SPIR-V %s shader not found, compiling GLSL to SPIR-V...", shader.stage))
+		glslToSpirv(shader.stage, glslPath, spvPath)
+	end
+
+	local shaderOutDir = string.format("%s/shaders/%s", outputDir, shader.name)
+	if not exists(shaderOutDir) then
+		mkdir(shaderOutDir)
+	end
+
+	spirvToLua(spvPath, string.format("%s/%s.lua", shaderOutDir, shader.stage))
 end

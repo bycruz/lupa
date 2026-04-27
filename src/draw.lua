@@ -2,11 +2,8 @@ local hood = require("hood")
 local ffi = require("ffi")
 local lpmath = require("lupa.math")
 
-local pathSep = string.sub(package.config, 1, 1)
-
--- Directory of output package directory in target folder
-local packageDir = debug.getinfo(1, "S").source:sub(2)
-	:match("(.-" .. pathSep .. "target" .. pathSep .. "[^" .. pathSep .. "]+)")
+local vertexShader = require("lupa.shaders.main.vert")
+local fragmentShader = require("lupa.shaders.main.frag")
 
 ---@class lupa.Draw
 ---@field private swapchain hood.Swapchain
@@ -216,11 +213,11 @@ function Draw.new(window)
 	local pipeline = device:createPipeline({
 		layout = bindGroupLayout,
 		vertex = {
-			module = { type = "spirv", source = io.open(packageDir .. "/shaders/main.vert.spv", "rb"):read("*a") },
+			module = { type = "spirv", source = vertexShader },
 			buffers = { vertexLayout }
 		},
 		fragment = {
-			module = { type = "spirv", source = io.open(packageDir .. "/shaders/main.frag.spv", "rb"):read("*a") },
+			module = { type = "spirv", source = fragmentShader },
 			targets = {
 				{
 					blend = "alpha-blending",
