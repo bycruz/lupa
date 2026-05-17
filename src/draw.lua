@@ -95,9 +95,12 @@ local TransformsSize = ffi.sizeof("LupaTransforms")
 local Lighting = ffi.typeof("LupaLighting")
 local LightingSize = ffi.sizeof("LupaLighting")
 
+local backend = os.getenv("BACKEND") or "vulkan"
+local shaderType = backend == "vulkan" and "spirv" or "glsl"
+
 ---@param window winit.Window
 function Draw.new(window)
-	local instance = hood.Instance.new({ backend = "vulkan", flags = {} })
+	local instance = hood.Instance.new({ backend = backend, flags = {} })
 	local adapter = instance:requestAdapter({ powerPreference = "high-performance" })
 	local device = adapter:requestDevice()
 
@@ -151,73 +154,57 @@ function Draw.new(window)
 		usages = { "UNIFORM", "COPY_DST" }
 	})
 
-	local bindGroupLayout = device:createBindGroupLayout({
-		{ -- Transforms
-			binding = 0,
-			type = "uniform-buffer",
-			visibility = { "FRAGMENT", "VERTEX" }
-		},
-		{ -- Lighting
-			binding = 1,
-			type = "uniform-buffer",
-			visibility = { "FRAGMENT" }
-		},
-		{ -- Texture
-			binding = 2,
-			type = "texture",
-			visibility = { "FRAGMENT" }
-		},
-		{ -- Sampler
-			binding = 3,
-			type = "sampler",
-			visibility = { "FRAGMENT" }
-		},
-		{ -- UV Scales
-			binding = 4,
-			type = "uniform-buffer",
-			visibility = { "FRAGMENT" }
-		}
-	})
+	local isVulkan = backend == "vulkan"
 
-	local bindGroup = device:createBindGroup({
+	local bindings = {
+		transforms = 0,
+		lighting = 1,
+		centralTexture = 2,
+		centralSampler = isVulkan and 3 or 2, -- separate for Vulkan, same unit for OpenGL
+		uvScales = 4
+	}
+
+	local textureView = texture:createView({})
+
+	-- Build bind group layout
+	local layoutEntries = {
+		{ binding = bindings.transforms,     type = "uniform-buffer", visibility = { "FRAGMENT", "VERTEX" } },
+		{ binding = bindings.lighting,       type = "uniform-buffer", visibility = { "FRAGMENT" } },
+		{ binding = bindings.centralTexture, type = "texture",        visibility = { "FRAGMENT" } },
+		{ binding = bindings.uvScales,       type = "uniform-buffer", visibility = { "FRAGMENT" } }
+	}
+	-- Only Vulkan needs a separate sampler entry in the layout
+	if isVulkan then
+		table.insert(layoutEntries, { binding = bindings.centralSampler, type = "sampler", visibility = { "FRAGMENT" } })
+	end
+	table.sort(layoutEntries, function(a, b) return a.binding < b.binding end)
+
+	bindGroupLayout = device:createBindGroupLayout(layoutEntries)
+
+	-- Build bind group entries
+	local bgEntries = {
+		{ binding = bindings.transforms,     type = "uniform-buffer", buffer = transformsBuffer },
+		{ binding = bindings.lighting,       type = "uniform-buffer", buffer = lightingBuffer },
+		{ binding = bindings.centralTexture, type = "texture",        texture = textureView },
+		{ binding = bindings.uvScales,       type = "uniform-buffer", buffer = uvScalesBuffer }
+	}
+	-- Sampler binds to same unit as texture in OpenGL, separate in Vulkan
+	table.insert(bgEntries, { binding = bindings.centralSampler, type = "sampler", sampler = sampler })
+	table.sort(bgEntries, function(a, b) return a.binding < b.binding end)
+
+	bindGroup = device:createBindGroup({
 		layout = bindGroupLayout,
-		entries = {
-			{
-				binding = 0,
-				type = "uniform-buffer",
-				buffer = transformsBuffer
-			},
-			{
-				binding = 1,
-				type = "uniform-buffer",
-				buffer = lightingBuffer
-			},
-			{
-				binding = 2,
-				type = "texture",
-				texture = texture:createView({})
-			},
-			{
-				binding = 3,
-				type = "sampler",
-				sampler = sampler
-			},
-			{
-				binding = 4,
-				type = "uniform-buffer",
-				buffer = uvScalesBuffer
-			}
-		}
+		entries = bgEntries
 	})
 
 	local pipeline = device:createPipeline({
 		layout = bindGroupLayout,
 		vertex = {
-			module = { type = "spirv", source = vertexShader },
+			module = { type = shaderType, source = vertexShader },
 			buffers = { vertexLayout }
 		},
 		fragment = {
-			module = { type = "spirv", source = fragmentShader },
+			module = { type = shaderType, source = fragmentShader },
 			targets = {
 				{
 					blend = "alpha-blending",
@@ -245,6 +232,7 @@ function Draw.new(window)
 
 	local depthBufferView = depthBuffer:createView({})
 
+	---@format disable-next
 	return setmetatable({
 		swapchain = swapchain,
 		pipeline = pipeline,
@@ -330,6 +318,7 @@ end
 ---@param y number
 ---@param w number
 ---@param h number
+---@format disable-next
 function Draw:rect(x, y, w, h)
 	local verts = self.vertices
 	local idxs  = self.indices

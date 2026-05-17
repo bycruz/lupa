@@ -1,4 +1,4 @@
-local outputDir = os.getenv("LPM_OUTPUT_DIR")
+local outputDir = os.getenv("LDE_OUTPUT_DIR")
 
 local pathSep = string.sub(package.config, 1, 1)
 
@@ -44,6 +44,27 @@ local function spirvToLua(spvPath, luaPath)
 	out:close()
 end
 
+---@param glslPath string
+---@param luaPath string
+local function glslToLua(glslPath, luaPath)
+	local f = assert(io.open(glslPath, "r"))
+	local source = f:read("*a")
+	f:close()
+
+	local escaped = source:gsub("\\", "\\\\")
+		:gsub('"', '\\"')
+		:gsub("\n", "\\n")
+
+	local out = assert(io.open(luaPath, "w"))
+	out:write('return "' .. escaped .. '"\n')
+	out:close()
+end
+
+---@return boolean
+local function useOpenglBackend()
+	return os.getenv("BACKEND") == "opengl"
+end
+
 ---@param path string
 local function mkdir(path)
 	if jit.os == "Windows" then
@@ -55,22 +76,30 @@ end
 
 local shaders = {
 	{ name = "main", stage = "vert" },
-	{ name = "main", stage = "frag" },
+	{ name = "main", stage = "frag" }
 }
+
+local backendIsOpengl = useOpenglBackend()
 
 for _, shader in ipairs(shaders) do
 	local glslPath = string.format("%s/shaders/%s.%s.glsl", packageSourceDir, shader.name, shader.stage)
-	local spvPath = string.format("%s/shaders/%s.%s.spv", packageSourceDir, shader.name, shader.stage)
-
-	if not exists(spvPath) then
-		print(string.format("SPIR-V %s shader not found, compiling GLSL to SPIR-V...", shader.stage))
-		glslToSpirv(shader.stage, glslPath, spvPath)
-	end
-
 	local shaderOutDir = string.format("%s/shaders/%s", outputDir, shader.name)
+
 	if not exists(shaderOutDir) then
 		mkdir(shaderOutDir)
 	end
 
-	spirvToLua(spvPath, string.format("%s/%s.lua", shaderOutDir, shader.stage))
+	if backendIsOpengl then
+		print(string.format("Writing GLSL %s shader directly...", shader.stage))
+		glslToLua(glslPath, string.format("%s/%s.lua", shaderOutDir, shader.stage))
+	else
+		local spvPath = string.format("%s/shaders/%s.%s.spv", packageSourceDir, shader.name, shader.stage)
+
+		if not exists(spvPath) then
+			print(string.format("SPIR-V %s shader not found, compiling GLSL to SPIR-V...", shader.stage))
+			glslToSpirv(shader.stage, glslPath, spvPath)
+		end
+
+		spirvToLua(spvPath, string.format("%s/%s.lua", shaderOutDir, shader.stage))
+	end
 end

@@ -1,5 +1,14 @@
 #version 450
 
+#ifndef VULKAN
+out gl_PerVertex {
+    vec4 gl_Position;
+};
+#define BINDING(x) layout(binding = x)
+#else
+#define BINDING(x) layout(set = 0, binding = x)
+#endif
+
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec3 a_normal;
@@ -12,7 +21,7 @@ layout(location = 2) out vec4 v_color;
 layout(location = 3) out vec3 v_worldPos;
 layout(location = 4) out float v_textureIndex;
 
-layout(set = 0, binding = 0) uniform Transforms {
+BINDING(0) uniform Transforms {
     mat4 u_viewProj;
     mat4 u_model;
 };

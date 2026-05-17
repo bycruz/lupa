@@ -1,5 +1,15 @@
 #version 450
 
+#ifndef VULKAN
+#define BINDING(x) layout(binding = x)
+#define TEXTURE2D_ARRAY sampler2DArray
+#define SAMPLE_TEXTURE(tex, coord) texture(tex, coord)
+#else
+#define BINDING(x) layout(set = 0, binding = x)
+#define TEXTURE2D_ARRAY texture2DArray
+#define SAMPLE_TEXTURE(tex, sampler, coord) texture(sampler2DArray(tex, sampler), coord)
+#endif
+
 layout(location = 0) in vec2 v_uv;
 layout(location = 1) in vec3 v_normal;
 layout(location = 2) in vec4 v_color;
@@ -8,14 +18,14 @@ layout(location = 4) in float v_textureIndex;
 
 layout(location = 0) out vec4 out_color;
 
-layout(set = 0, binding = 0) uniform Transforms {
+BINDING(0) uniform Transforms {
     mat4 u_viewProj;
     mat4 u_model;
 };
 
-layout(set = 0, binding = 1) uniform Lighting {
+BINDING(1) uniform Lighting {
     vec3 u_lightDir;
-    float u_lightEnabled; // 0.0 = 2d, 1.0 = 3d
+    float u_lightEnabled;
     vec3 u_lightColor;
     float _pad0;
     vec3 u_ambientColor;
@@ -24,21 +34,28 @@ layout(set = 0, binding = 1) uniform Lighting {
     float _pad2;
 };
 
-layout(set = 0, binding = 2) uniform texture2DArray u_textures;
-layout(set = 0, binding = 3) uniform sampler u_sampler;
+#ifndef VULKAN
+BINDING(2) uniform TEXTURE2D_ARRAY u_textures;
+#else
+BINDING(2) uniform texture2DArray u_textures;
+BINDING(3) uniform sampler u_sampler;
+#endif
 
-layout(set = 0, binding = 4) uniform TextureScales {
-    vec2 u_uvScales[256]; // or however many max textures you support
+BINDING(4) uniform TextureScales {
+    vec2 u_uvScales[256];
 };
 
 void main() {
-    // vec4 texColor = texture(sampler2DArray(u_textures, u_sampler), vec3(v_uv * uvScale, v_textureIndex)) * v_color;
     vec4 texColor;
     if (v_textureIndex < 0.0) {
         texColor = v_color;
     } else {
         vec2 uvScale = u_uvScales[int(v_textureIndex)];
-        texColor = texture(sampler2DArray(u_textures, u_sampler), vec3(v_uv * uvScale, v_textureIndex)) * v_color;
+#ifndef VULKAN
+        texColor = SAMPLE_TEXTURE(u_textures, vec3(v_uv * uvScale, v_textureIndex)) * v_color;
+#else
+        texColor = SAMPLE_TEXTURE(u_textures, u_sampler, vec3(v_uv * uvScale, v_textureIndex)) * v_color;
+#endif
     }
 
     if (u_lightEnabled < 0.5) {
