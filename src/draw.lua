@@ -45,9 +45,16 @@ local MAX_TEXTURE_HEIGHT = 512
 
 local MAX_VERTICES = 65536
 
---- Quads the vertex buffer can hold. The index buffer is built for this many
---- quads up front, so it never has to be rewritten.
+--- Upper bound on the CPU-side index array. Quad geometry needs 6 per quad;
+--- meshes add their own on top.
+local MAX_INDICES = 262144
+
+--- Quads the vertex buffer can hold. The index buffer is seeded with the quad
+--- pattern for this many quads, so quad-only frames never rewrite it.
 local MAX_QUADS = MAX_VERTICES / 4
+
+--- Depth of the model matrix stack.
+local MODEL_STACK_MAX = 32
 
 ffi.cdef [[
     typedef struct {
@@ -268,6 +275,14 @@ function Draw.new(window)
 
 	local depthBufferView = depthBuffer:createView({})
 
+	-- Preallocated so pushModel/popModel never allocate.
+	local modelStack = {}
+	local modelIdentStack = {}
+	for i = 1, MODEL_STACK_MAX do
+		modelStack[i] = lpmath.mat4.identity()
+		modelIdentStack[i] = true
+	end
+
 	-- The index buffer is positional and never changes, so it is written once
 	-- here instead of being re-uploaded every frame.
 	device.queue:writeBuffer(indexBuffer, IndexArraySize * MAX_QUADS * 6, buildIndices())
@@ -293,6 +308,16 @@ function Draw.new(window)
 		sampler = sampler,
 		uvScalesBuffer = uvScalesBuffer,
 		vertices = VertexArray(MAX_VERTICES),
+		indices = IndexArray(MAX_INDICES),
+		modelStack = modelStack,
+		modelIdentStack = modelIdentStack,
+		modelDepth = 1,
+		model = modelStack[1],
+		modelIdentity = true,
+		rotationScratch = lpmath.mat4.identity(),
+		customView = false,
+		camera = nil,
+		meshIndexCount = 0,
 		curR = 1, curG = 1, curB = 1, curA = 1,
 		curTexture = -1,
 		transforms = Transforms(),
@@ -357,6 +382,8 @@ function Draw:setColor(r, g, b, a)
 	self.curR = r; self.curG = g; self.curB = b; self.curA = a or 1.0
 end
 
+--- Draw a rectangle. (x, y) is the bottom-left corner: the default 2D view is
+--- orthographic with y increasing upward.
 ---@param x number
 ---@param y number
 ---@param w number
@@ -364,10 +391,15 @@ end
 ---@format disable-next
 function Draw:rect(x, y, w, h)
 	local verts = self.vertices
+	local idxs  = self.indices
 	local vc    = self.vertexCount
 	local ic    = self.indexCount
 	local r, g, b, a = self.curR, self.curG, self.curB, self.curA
 	local tex   = self.curTexture
+
+	if vc > MAX_VERTICES - 4 then
+		error("lupa: geometry buffers are full")
+	end
 
 	local v = verts[vc]
 	v.x, v.y, v.z = x, y, 0
@@ -397,11 +429,444 @@ function Draw:rect(x, y, w, h)
 	v.r, v.g, v.b, v.a = r, g, b, a
 	v.textureIndex = tex
 
-	-- The six indices for this quad are already in the index buffer: quad q
-	-- always uses vertices 4q..4q+3 in the same order, so the pattern is
-	-- positional and a prefix of it covers any quad count. See buildIndices().
+	idxs[ic]     = vc
+	idxs[ic + 1] = vc + 1
+	idxs[ic + 2] = vc + 2
+	idxs[ic + 3] = vc + 1
+	idxs[ic + 4] = vc + 3
+	idxs[ic + 5] = vc + 2
+
 	self.vertexCount = vc + 4
 	self.indexCount  = ic + 6
+end
+
+-- ===========================================================================
+-- Meshes
+-- ===========================================================================
+
+--- Unit meshes are flat arrays of x, y, z, nx, ny, nz per vertex, centred on
+--- the origin: the draw call supplies position and scale. Faces are wound
+--- counter-clockwise as seen from outside.
+
+---@type number[]
+local CUBE_VERTICES = ffi.new("float[144]", {
+	-- +Z
+	-0.5, -0.5,  0.5,  0,  0,  1,
+	 0.5, -0.5,  0.5,  0,  0,  1,
+	 0.5,  0.5,  0.5,  0,  0,  1,
+	-0.5,  0.5,  0.5,  0,  0,  1,
+	-- -Z
+	 0.5, -0.5, -0.5,  0,  0, -1,
+	-0.5, -0.5, -0.5,  0,  0, -1,
+	-0.5,  0.5, -0.5,  0,  0, -1,
+	 0.5,  0.5, -0.5,  0,  0, -1,
+	-- +X
+	 0.5, -0.5,  0.5,  1,  0,  0,
+	 0.5, -0.5, -0.5,  1,  0,  0,
+	 0.5,  0.5, -0.5,  1,  0,  0,
+	 0.5,  0.5,  0.5,  1,  0,  0,
+	-- -X
+	-0.5, -0.5, -0.5, -1,  0,  0,
+	-0.5, -0.5,  0.5, -1,  0,  0,
+	-0.5,  0.5,  0.5, -1,  0,  0,
+	-0.5,  0.5, -0.5, -1,  0,  0,
+	-- +Y
+	-0.5,  0.5,  0.5,  0,  1,  0,
+	 0.5,  0.5,  0.5,  0,  1,  0,
+	 0.5,  0.5, -0.5,  0,  1,  0,
+	-0.5,  0.5, -0.5,  0,  1,  0,
+	-- -Y
+	-0.5, -0.5, -0.5,  0, -1,  0,
+	 0.5, -0.5, -0.5,  0, -1,  0,
+	 0.5, -0.5,  0.5,  0, -1,  0,
+	-0.5, -0.5,  0.5,  0, -1,  0,
+})
+
+---@type ffi.cdata*
+local CUBE_INDICES = ffi.new("int[36]", {
+	 0,  1,  2,  0,  2,  3,
+	 4,  5,  6,  4,  6,  7,
+	 8,  9, 10,  8, 10, 11,
+	12, 13, 14, 12, 14, 15,
+	16, 17, 18, 16, 18, 19,
+	20, 21, 22, 20, 22, 23,
+})
+
+---@type ffi.cdata*
+local PLANE_VERTICES = ffi.new("float[24]", {
+	-0.5, 0,  0.5,  0, 1, 0,
+	 0.5, 0,  0.5,  0, 1, 0,
+	 0.5, 0, -0.5,  0, 1, 0,
+	-0.5, 0, -0.5,  0, 1, 0,
+})
+
+---@type ffi.cdata*
+local PLANE_INDICES = ffi.new("int[6]", { 0, 1, 2, 0, 2, 3 })
+
+--- Unit UV sphere, cached per tessellation because a scene usually uses one.
+local sphereCache = {}
+
+---@param segments number
+---@param rings number
+---@return ffi.cdata* vertices, ffi.cdata* indices, number vertexCount, number indexCount
+local function sphereMesh(segments, rings)
+	local key = segments * 1024 + rings
+	local hit = sphereCache[key]
+	if hit then
+		return hit.vertices, hit.indices, hit.vertexCount, hit.indexCount
+	end
+
+	local vcount = (rings + 1) * (segments + 1)
+	local icount = rings * segments * 6
+	local verts = ffi.new("float[?]", vcount * 6)
+	local indices = ffi.new("int[?]", icount)
+	local stride = segments + 1
+
+	local v = 0
+	for ring = 0, rings do
+		local phi = math.pi * ring / rings
+		local y = math.cos(phi) * 0.5
+		local radius = math.sin(phi) * 0.5
+		for seg = 0, segments do
+			local theta = 2 * math.pi * seg / segments
+			local x = math.cos(theta) * radius
+			local z = math.sin(theta) * radius
+			verts[v] = x
+			verts[v + 1] = y
+			verts[v + 2] = z
+			-- On a sphere centred at the origin the normal is the direction
+			-- from the centre, which for radius 0.5 is the position doubled.
+			verts[v + 3] = x * 2
+			verts[v + 4] = y * 2
+			verts[v + 5] = z * 2
+			v = v + 6
+		end
+	end
+
+	local k = 0
+	for ring = 0, rings - 1 do
+		for seg = 0, segments - 1 do
+			local aa = ring * stride + seg
+			local bb = aa + stride
+			indices[k] = aa
+			indices[k + 1] = bb
+			indices[k + 2] = aa + 1
+			indices[k + 3] = aa + 1
+			indices[k + 4] = bb
+			indices[k + 5] = bb + 1
+			k = k + 6
+		end
+	end
+
+	local entry = {
+		vertices = verts,
+		indices = indices,
+		vertexCount = vcount,
+		indexCount = icount,
+	}
+	sphereCache[key] = entry
+
+	return entry.vertices, entry.indices, entry.vertexCount, entry.indexCount
+end
+
+--- Emit a mesh: scale, then the current model matrix, then the position.
+--- The model matrix is applied on the CPU rather than through the `u_model`
+--- uniform because the uniform is per-frame -- using it would force one draw
+--- call per object instead of one for the whole frame.
+---@param self lupa.Draw
+---@param verts ffi.cdata*
+---@param indices ffi.cdata*
+---@param vcount number
+---@param icount number
+---@param px number
+---@param py number
+---@param pz number
+---@param sx number
+---@param sy number
+---@param sz number
+local function emitMesh(self, verts, indices, vcount, icount, px, py, pz, sx, sy, sz)
+	local base = self.vertexCount
+	local ic = self.indexCount
+
+	if base + vcount > MAX_VERTICES or ic + icount > MAX_INDICES then
+		error("lupa: geometry buffers are full; split the draw or raise MAX_VERTICES/MAX_INDICES")
+	end
+
+	local out = self.vertices
+	local idxs = self.indices
+	local r, g, b, a = self.curR, self.curG, self.curB, self.curA
+	local tex = self.curTexture
+
+	-- The transform / no-transform split is hoisted out of the vertex loop so
+	-- each loop is a straight-line trace with no per-vertex branch. This is the
+	-- hottest 3D path: it runs once per vertex of every mesh in the frame.
+	if not self.modelIdentity then
+		local e = self.model.m
+		local m00, m01, m02, m03 = e[0], e[4], e[8], e[12]
+		local m10, m11, m12, m13 = e[1], e[5], e[9], e[13]
+		local m20, m21, m22, m23 = e[2], e[6], e[10], e[14]
+
+		local j = 0
+		for i = 0, vcount - 1 do
+			local x, y, z = verts[j] * sx, verts[j + 1] * sy, verts[j + 2] * sz
+			local nx, ny, nz = verts[j + 3], verts[j + 4], verts[j + 5]
+			j = j + 6
+
+			local v = out[base + i]
+			v.x = m00 * x + m01 * y + m02 * z + m03 + px
+			v.y = m10 * x + m11 * y + m12 * z + m13 + py
+			v.z = m20 * x + m21 * y + m22 * z + m23 + pz
+			v.u, v.v = 0, 0
+			-- Normals get the same rotation; for non-uniform scale this is an
+			-- approximation, and the shader renormalises.
+			v.nx = m00 * nx + m01 * ny + m02 * nz
+			v.ny = m10 * nx + m11 * ny + m12 * nz
+			v.nz = m20 * nx + m21 * ny + m22 * nz
+			v.r, v.g, v.b, v.a = r, g, b, a
+			v.textureIndex = tex
+		end
+	else
+		local j = 0
+		for i = 0, vcount - 1 do
+			local v = out[base + i]
+			v.x = verts[j] * sx + px
+			v.y = verts[j + 1] * sy + py
+			v.z = verts[j + 2] * sz + pz
+			v.u, v.v = 0, 0
+			v.nx, v.ny, v.nz = verts[j + 3], verts[j + 4], verts[j + 5]
+			v.r, v.g, v.b, v.a = r, g, b, a
+			v.textureIndex = tex
+			j = j + 6
+		end
+	end
+
+	for i = 0, icount - 1 do
+		idxs[ic] = base + indices[i]
+		ic = ic + 1
+	end
+
+	self.vertexCount = base + vcount
+	self.indexCount = ic
+	self.meshIndexCount = self.meshIndexCount + icount
+end
+
+-- ===========================================================================
+-- 2D/3D camera
+-- ===========================================================================
+
+--- Accept {x=,y=,z=} or {x,y,z}, falling back per component.
+---@param t table|nil
+---@return number, number, number
+local function xyz(t, dx, dy, dz)
+	if type(t) ~= "table" then
+		return dx, dy, dz
+	end
+	return t.x or t[1] or dx, t.y or t[2] or dy, t.z or t[3] or dz
+end
+
+---@return lupa.math.Vec3
+local function toVec3(t, dx, dy, dz)
+	local x, y, z = xyz(t, dx, dy, dz)
+	return lpmath.vec3.new(x, y, z)
+end
+
+--- Point a perspective camera at a target, replacing the default 2D
+--- orthographic view until setOrtho() is called.
+---
+--- The camera only sets the view-projection for the frame; it does not change
+--- how geometry is submitted, so 2D and 3D draws can be mixed freely.
+---@param t { position: table, target: table?, up: table?, fov: number?, near: number?, far: number? }
+function Draw:setCamera(t)
+	assert(type(t) == "table" and t.position ~= nil, "setCamera requires { position = { x, y, z } }")
+	self.camera = t
+
+	local eye = toVec3(t.position, 0, 0, 0)
+	local target = toVec3(t.target, 0, 0, 0)
+	local up = toVec3(t.up, 0, 1, 0)
+
+	local aspect = self.window.width / self.window.height
+	local view = lpmath.mat4.lookAt(eye, target, up)
+	local proj = lpmath.mat4.perspective(
+		t.fov or (math.pi / 3), aspect, t.near or 0.1, t.far or 1000)
+
+	self.transforms.viewProj = lpmath.mat4.mul(proj, view)
+	self.customView = true
+	self.projWidth, self.projHeight = nil, nil
+
+	-- Specular highlights need the eye position.
+	local light = self.lighting
+	light.cameraPos[0] = eye.x
+	light.cameraPos[1] = eye.y
+	light.cameraPos[2] = eye.z
+end
+
+--- Supply the view-projection matrix directly.
+---@param m lupa.math.Mat4
+function Draw:setViewProjection(m)
+	self.transforms.viewProj = m
+	self.customView = true
+	self.camera = nil
+	self.projWidth, self.projHeight = nil, nil
+end
+
+--- Return to the default 2D orthographic view.
+function Draw:setOrtho()
+	self.customView = false
+	self.camera = nil
+	self.projWidth, self.projHeight = nil, nil
+end
+
+-- ===========================================================================
+-- Model transform
+-- ===========================================================================
+
+--- Reset the stack to a single identity matrix.
+function Draw:resetModel()
+	local e = self.modelStack[1].m
+	e[0], e[1], e[2], e[3] = 1, 0, 0, 0
+	e[4], e[5], e[6], e[7] = 0, 1, 0, 0
+	e[8], e[9], e[10], e[11] = 0, 0, 1, 0
+	e[12], e[13], e[14], e[15] = 0, 0, 0, 1
+
+	self.modelDepth = 1
+	self.model = self.modelStack[1]
+	for i = 1, MODEL_STACK_MAX do
+		self.modelIdentStack[i] = true
+	end
+	self.modelIdentity = true
+end
+
+--- Save the current transform and start a nested one.
+function Draw:pushModel()
+	local depth = self.modelDepth + 1
+	if depth > MODEL_STACK_MAX then
+		error("lupa: model matrix stack overflow (max " .. MODEL_STACK_MAX .. ")")
+	end
+
+	local dst, src = self.modelStack[depth].m, self.modelStack[depth - 1].m
+	for i = 0, 15 do
+		dst[i] = src[i]
+	end
+
+	self.modelDepth = depth
+	self.model = self.modelStack[depth]
+	self.modelIdentStack[depth] = self.modelIdentStack[depth - 1]
+end
+
+--- Restore the transform saved by the matching pushModel.
+function Draw:popModel()
+	local depth = self.modelDepth
+	if depth <= 1 then
+		return
+	end
+	self.modelDepth = depth - 1
+	self.model = self.modelStack[depth - 1]
+	self.modelIdentity = self.modelIdentStack[depth - 1]
+end
+
+---@param x number
+---@param y number
+---@param z number
+function Draw:translate(x, y, z)
+	local e = self.model.m
+	e[12] = e[0] * x + e[4] * y + e[8] * z + e[12]
+	e[13] = e[1] * x + e[5] * y + e[9] * z + e[13]
+	e[14] = e[2] * x + e[6] * y + e[10] * z + e[14]
+	e[15] = e[3] * x + e[7] * y + e[11] * z + e[15]
+	self.modelIdentity = false
+end
+
+---@param x number
+---@param y number? defaults to x
+---@param z number? defaults to x
+function Draw:scale(x, y, z)
+	y = y or x
+	z = z or x
+	local e = self.model.m
+	e[0], e[1], e[2], e[3] = e[0] * x, e[1] * x, e[2] * x, e[3] * x
+	e[4], e[5], e[6], e[7] = e[4] * y, e[5] * y, e[6] * y, e[7] * y
+	e[8], e[9], e[10], e[11] = e[8] * z, e[9] * z, e[10] * z, e[11] * z
+	self.modelIdentity = false
+end
+
+--- Rotate about an axis, defaulting to +Y.
+---@param angle number radians
+---@param x number?
+---@param y number?
+---@param z number?
+function Draw:rotate(angle, x, y, z)
+	if x == nil and y == nil and z == nil then
+		x, y, z = 0, 1, 0
+	end
+	lpmath.mat4.rotateInto(self.rotationScratch, angle, x or 0, y or 0, z or 0)
+	lpmath.mat4.mulInto(self.model, self.model, self.rotationScratch)
+	self.modelIdentity = false
+end
+
+-- ===========================================================================
+-- 3D primitives
+-- ===========================================================================
+
+--- Axis-aligned cube of edge `size`, centred on (x, y, z) before the model
+--- transform is applied.
+---@param x number
+---@param y number
+---@param z number
+---@param size number?
+function Draw:cube(x, y, z, size)
+	local s = size or 1
+	emitMesh(self, CUBE_VERTICES, CUBE_INDICES, 24, 36, x, y, z, s, s, s)
+end
+
+--- UV sphere of radius `radius` centred on (x, y, z).
+---@param x number
+---@param y number
+---@param z number
+---@param radius number?
+---@param segments number? longitude divisions, default 24
+function Draw:sphere(x, y, z, radius, segments)
+	segments = segments or 24
+	local rings = math.max(2, math.floor(segments / 2))
+	local verts, indices, vcount, icount = sphereMesh(segments, rings)
+	local s = (radius or 1) * 2 -- the unit sphere has radius 0.5
+	emitMesh(self, verts, indices, vcount, icount, x, y, z, s, s, s)
+end
+
+--- Horizontal plane spanning `width` on X and `depth` on Z, centred on (x, y, z).
+---@param x number
+---@param y number
+---@param z number
+---@param width number?
+---@param depth number?
+function Draw:plane(x, y, z, width, depth)
+	emitMesh(self, PLANE_VERTICES, PLANE_INDICES, 4, 6, x, y, z, width or 1, 1, depth or 1)
+end
+
+-- ===========================================================================
+-- Lighting
+-- ===========================================================================
+
+--- Enable Blinn-Phong shading for everything drawn afterwards, including 2D
+--- rects (whose normals all face +Z). Off by default.
+---@param t { direction: table, color: table?, ambient: table? }
+function Draw:setLight(t)
+	local light = self.lighting
+
+	local dx, dy, dz = xyz(t.direction, -0.5, -1, -0.3)
+	light.lightDir[0], light.lightDir[1], light.lightDir[2] = dx, dy, dz
+
+	local cr, cg, cb = xyz(t.color, 1, 1, 1)
+	light.lightColor[0], light.lightColor[1], light.lightColor[2] = cr, cg, cb
+
+	local ar, ag, ab = xyz(t.ambient, 0.2, 0.2, 0.2)
+	light.ambientColor[0], light.ambientColor[1], light.ambientColor[2] = ar, ag, ab
+
+	light.lightEnabled = 1.0
+end
+
+--- Back to unlit: vertex colours are used directly.
+function Draw:clearLight()
+	self.lighting.lightEnabled = 0.0
 end
 
 function Draw:line()
@@ -411,6 +876,7 @@ end
 function Draw:beginFrame()
 	self.vertexCount = 0
 	self.indexCount = 0
+	self.meshIndexCount = 0
 end
 
 --- Rebuild everything that depends on the surface size. Called when the window
@@ -432,13 +898,25 @@ function Draw:resize()
 	})
 	local depthBufferView = depthBuffer:createView({})
 
+	-- Preallocated so pushModel/popModel never allocate.
+	local modelStack = {}
+	local modelIdentStack = {}
+	for i = 1, MODEL_STACK_MAX do
+		modelStack[i] = lpmath.mat4.identity()
+		modelIdentStack[i] = true
+	end
+
 	self.swapchain = swapchain
 	self.depthBuffer = depthBuffer
 	self.depthBufferView = depthBufferView
 	self.renderDesc.depthStencilAttachment.texture = depthBufferView
 
-	-- Force the projection to be rebuilt for the new size.
+	-- Force the projection to be rebuilt for the new size, and re-derive the
+	-- camera so its aspect ratio tracks the window.
 	self.projWidth, self.projHeight = nil, nil
+	if self.camera then
+		self:setCamera(self.camera)
+	end
 
 	if oldDepthView then
 		oldDepthView:destroy()
@@ -450,18 +928,20 @@ end
 
 ---@private
 function Draw:endFrame()
-	-- The projection only depends on the window size, so it is rebuilt only
-	-- when that changes rather than allocating a fresh matrix every frame.
+	-- The default 2D orthographic projection only depends on the window size, so
+	-- it is rebuilt only when that changes. A camera or an explicit matrix owns
+	-- viewProj instead, and lighting is the caller's choice.
 	local width, height = self.window.width, self.window.height
 	local transforms = self.transforms
-	if self.projWidth ~= width or self.projHeight ~= height then
-		self.projWidth, self.projHeight = width, height
-		transforms.viewProj = lpmath.mat4.ortho(0, width, 0, height, -1, 1)
+	if not self.customView then
+		if self.projWidth ~= width or self.projHeight ~= height then
+			self.projWidth, self.projHeight = width, height
+			transforms.viewProj = lpmath.mat4.ortho(0, width, 0, height, -1, 1)
+		end
 	end
 	transforms.model = self.identityModel
 
 	local lighting = self.lighting
-	lighting.lightEnabled = 0.0
 
 	local texture = self.swapchain:getCurrentTexture()
 	if not texture then
@@ -479,7 +959,12 @@ function Draw:endFrame()
 	encoder:writeBuffer(self.transformsBuffer, TransformsSize, transforms)
 	encoder:writeBuffer(self.lightingBuffer, LightingSize, lighting)
 	encoder:writeBuffer(self.vertexBuffer, VertexArraySize * self.vertexCount, self.vertices)
-	-- The index buffer is written once at construction and never changes.
+	-- Quad-only frames match the index pattern seeded at construction, so the
+	-- upload is skipped. A frame that drew meshes wrote its own indices.
+	if self.meshIndexCount > 0 then
+		encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
+	end
+
 	local renderDesc = self.renderDesc
 	renderDesc.colorAttachments[1].texture = texture:createView(self.emptyViewDesc)
 	encoder:beginRendering(renderDesc)
