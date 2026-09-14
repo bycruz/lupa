@@ -44,7 +44,10 @@ local MAX_TEXTURE_WIDTH = 512
 local MAX_TEXTURE_HEIGHT = 512
 
 local MAX_VERTICES = 65536
-local MAX_INDICES = 65536
+
+--- Quads the vertex buffer can hold. The index buffer is built for this many
+--- quads up front, so it never has to be rewritten.
+local MAX_QUADS = MAX_VERTICES / 4
 
 ffi.cdef [[
     typedef struct {
@@ -87,6 +90,35 @@ local VertexArraySize = ffi.sizeof("LupaVertex")
 local IndexArray = ffi.typeof("uint16_t[?]")
 local IndexArraySize = ffi.sizeof("uint16_t")
 
+--- The index buffer for quad q is always vertices 4q, 4q+1, 4q+2, 4q+1, 4q+3,
+--- 4q+2 -- two triangles in the same winding, with no dependency on anything but
+--- the quad's position in the batch. That makes the whole buffer positional, so
+--- it is generated once for MAX_QUADS quads and never rewritten: drawing the
+--- first `indexCount` entries is correct for any number of quads.
+---
+--- This is why Draw:rect no longer writes indices and Draw:endFrame no longer
+--- uploads them. It holds as long as rects are the only thing that emits
+--- geometry, which is true of the public API (pushVertex/pushIndex are
+--- private, and a future triangle path would need its own index strategy).
+---@return ffi.cdata*
+local function buildIndices()
+	local indices = IndexArray(MAX_QUADS * 6)
+
+	for q = 0, MAX_QUADS - 1 do
+		local vc = q * 4
+		local ic = q * 6
+		indices[ic]     = vc
+		indices[ic + 1] = vc + 1
+		indices[ic + 2] = vc + 2
+		indices[ic + 3] = vc + 1
+		indices[ic + 4] = vc + 3
+		indices[ic + 5] = vc + 2
+	end
+
+	return indices
+end
+
+
 ---@type fun(proj: lupa.math.Mat4, model: lupa.math.Mat4): ffi.cdata*
 local Transforms = ffi.typeof("LupaTransforms")
 local TransformsSize = ffi.sizeof("LupaTransforms")
@@ -105,7 +137,8 @@ function Draw.new(window)
 	local device = adapter:requestDevice()
 
 	local surface = instance:createSurface(window)
-	local swapchain = surface:configure(device, { presentMode = "immediate" })
+	local surfaceConfig = { presentMode = "immediate" }
+	local swapchain = surface:configure(device, surfaceConfig)
 
 	local vertexLayout = hood.VertexLayout.new()
 		:withAttribute({ type = "f32", size = 3, offset = 0 }) -- position
@@ -224,13 +257,20 @@ function Draw.new(window)
 		}
 	})
 
+	-- Match the swapchain extent rather than the window size: hood derives the
+	-- render area from the swapchain texture, and a framebuffer whose depth
+	-- attachment is smaller than that render area is invalid.
 	local depthBuffer = device:createTexture({
-		extents = { dim = "2d", width = window.width, height = window.height },
+		extents = { dim = "2d", width = swapchain.width, height = swapchain.height },
 		format = "depth24plus",
 		usages = { "RENDER_ATTACHMENT" }
 	})
 
 	local depthBufferView = depthBuffer:createView({})
+
+	-- The index buffer is positional and never changes, so it is written once
+	-- here instead of being re-uploaded every frame.
+	device.queue:writeBuffer(indexBuffer, IndexArraySize * MAX_QUADS * 6, buildIndices())
 
 	---@format disable-next
 	return setmetatable({
@@ -238,6 +278,7 @@ function Draw.new(window)
 		pipeline = pipeline,
 		device = device,
 		surface = surface,
+		surfaceConfig = surfaceConfig,
 		window = window,
 		vertexBuffer = vertexBuffer,
 		indexBuffer = indexBuffer,
@@ -252,7 +293,6 @@ function Draw.new(window)
 		sampler = sampler,
 		uvScalesBuffer = uvScalesBuffer,
 		vertices = VertexArray(MAX_VERTICES),
-		indices = IndexArray(MAX_INDICES),
 		curR = 1, curG = 1, curB = 1, curA = 1,
 		curTexture = -1,
 		transforms = Transforms(),
@@ -299,10 +339,13 @@ function Draw:pushVertex(x, y, z, u, _v, nx, ny, nz, r, g, b, a, texIndex)
 	self.vertexCount = self.vertexCount + 1
 end
 
+--- Retained for symmetry with pushVertex. The index buffer is prebuilt and
+--- positional (see buildIndices), so an arbitrary index value cannot be stored;
+--- this only advances the draw count. Custom geometry built from pushVertex
+--- would need its own index buffer.
 ---@param i number
 ---@private
 function Draw:pushIndex(i)
-	self.indices[self.indexCount] = i
 	self.indexCount = self.indexCount + 1
 end
 
@@ -321,7 +364,6 @@ end
 ---@format disable-next
 function Draw:rect(x, y, w, h)
 	local verts = self.vertices
-	local idxs  = self.indices
 	local vc    = self.vertexCount
 	local ic    = self.indexCount
 	local r, g, b, a = self.curR, self.curG, self.curB, self.curA
@@ -355,13 +397,9 @@ function Draw:rect(x, y, w, h)
 	v.r, v.g, v.b, v.a = r, g, b, a
 	v.textureIndex = tex
 
-	idxs[ic]     = vc
-	idxs[ic + 1] = vc + 1
-	idxs[ic + 2] = vc + 2
-	idxs[ic + 3] = vc + 1
-	idxs[ic + 4] = vc + 3
-	idxs[ic + 5] = vc + 2
-
+	-- The six indices for this quad are already in the index buffer: quad q
+	-- always uses vertices 4q..4q+3 in the same order, so the pattern is
+	-- positional and a prefix of it covers any quad count. See buildIndices().
 	self.vertexCount = vc + 4
 	self.indexCount  = ic + 6
 end
@@ -373,6 +411,41 @@ end
 function Draw:beginFrame()
 	self.vertexCount = 0
 	self.indexCount = 0
+end
+
+--- Rebuild everything that depends on the surface size. Called when the window
+--- is resized, and from endFrame when the swapchain reports out-of-date.
+---
+--- The old swapchain is handed to hood so it can retire its sync objects and
+--- command buffers; waitIdle inside that call makes it safe to drop the old
+--- depth target afterwards.
+---@private
+function Draw:resize()
+	local device = self.device
+	local swapchain = self.surface:configure(device, self.surfaceConfig, self.swapchain)
+
+	local oldDepth, oldDepthView = self.depthBuffer, self.depthBufferView
+	local depthBuffer = device:createTexture({
+		extents = { dim = "2d", width = swapchain.width, height = swapchain.height },
+		format = "depth24plus",
+		usages = { "RENDER_ATTACHMENT" }
+	})
+	local depthBufferView = depthBuffer:createView({})
+
+	self.swapchain = swapchain
+	self.depthBuffer = depthBuffer
+	self.depthBufferView = depthBufferView
+	self.renderDesc.depthStencilAttachment.texture = depthBufferView
+
+	-- Force the projection to be rebuilt for the new size.
+	self.projWidth, self.projHeight = nil, nil
+
+	if oldDepthView then
+		oldDepthView:destroy()
+	end
+	if oldDepth then
+		oldDepth:destroy()
+	end
 end
 
 ---@private
@@ -392,7 +465,9 @@ function Draw:endFrame()
 
 	local texture = self.swapchain:getCurrentTexture()
 	if not texture then
-		-- todo: recreate swapchain
+		-- The swapchain no longer matches the surface (a resize happened).
+		-- Rebuild it and skip this frame; the next one renders normally.
+		self:resize()
 		return
 	end
 
@@ -404,7 +479,7 @@ function Draw:endFrame()
 	encoder:writeBuffer(self.transformsBuffer, TransformsSize, transforms)
 	encoder:writeBuffer(self.lightingBuffer, LightingSize, lighting)
 	encoder:writeBuffer(self.vertexBuffer, VertexArraySize * self.vertexCount, self.vertices)
-	encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
+	-- The index buffer is written once at construction and never changes.
 	local renderDesc = self.renderDesc
 	renderDesc.colorAttachments[1].texture = texture:createView(self.emptyViewDesc)
 	encoder:beginRendering(renderDesc)

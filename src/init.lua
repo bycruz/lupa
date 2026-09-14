@@ -61,6 +61,11 @@ function lupa.run(app)
 			app:update(dt, input)
 			input:clearFrame()
 			handler:requestRedraw(window)
+		elseif event.name == "resize" then
+			-- Rebuild the swapchain and depth target for the new surface size.
+			-- Without this the swapchain goes out of date and every frame is
+			-- dropped, leaving the window frozen.
+			draw:resize()
 		elseif event.name == "keyPress" then
 			input:registerPressed(event.key)
 		elseif event.name == "keyRelease" then
