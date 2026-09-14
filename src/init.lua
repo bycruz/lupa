@@ -37,7 +37,7 @@ function lupa.run(app)
 	-- draw first: Assets uploads images into draw's texture array.
 	local draw = Draw.new(window)
 	local assets = Assets.new(draw)
-	local input = Input.new()
+	local input = Input.new(window)
 
 	app:start(assets)
 
@@ -71,6 +71,17 @@ function lupa.run(app)
 			input:registerPressed(event.key)
 		elseif event.name == "keyRelease" then
 			input:registerReleased(event.key)
+		elseif event.name == "mouseMove" then
+			input:registerMouseMove(event.x, event.y)
+		elseif event.name == "mouseMotion" then
+			-- Raw device deltas, which is what a first-person camera turns by.
+			input:registerMouseMotion(event.dx, event.dy)
+		elseif event.name == "mouseScroll" then
+			input:registerMouseScroll(event.dx, event.dy)
+		elseif event.name == "mousePress" then
+			input:registerMousePressed(event.button)
+		elseif event.name == "mouseRelease" then
+			input:registerMouseReleased(event.button)
 		elseif event.name == "windowClose" then
 			handler:exit()
 		end
