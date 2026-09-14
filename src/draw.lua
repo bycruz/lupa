@@ -206,6 +206,15 @@ function Draw.new(window)
 
 	local textureView = texture:createView({})
 
+	-- The fragment shader multiplies each quad's UV by u_uvScales[textureIndex].
+	-- Uninitialised that is (0, 0), which collapses every sample to one texel,
+	-- so seed all 256 slots with 1.
+	local uvScales = ffi.new("float[512]")
+	for i = 0, 511 do
+		uvScales[i] = 1.0
+	end
+	device.queue:writeBuffer(uvScalesBuffer, 512 * 4, uvScales)
+
 	-- Build bind group layout
 	local layoutEntries = {
 		{ binding = bindings.transforms,     type = "uniform-buffer", visibility = { "FRAGMENT", "VERTEX" } },
@@ -320,6 +329,13 @@ function Draw.new(window)
 		meshIndexCount = 0,
 		curR = 1, curG = 1, curB = 1, curA = 1,
 		curTexture = -1,
+		texU0 = 0, texV0 = 0, texU1 = 1, texV1 = 1,
+		texDefault = true,
+		textureLayers = 0,
+		maxTextureWidth = MAX_TEXTURE_WIDTH,
+		maxTextureHeight = MAX_TEXTURE_HEIGHT,
+		uvScales = uvScales,
+		uvScalesDirty = false,
 		transforms = Transforms(),
 		lighting = Lighting(),
 		identityModel = lpmath.mat4.identity(),
@@ -396,6 +412,7 @@ function Draw:rect(x, y, w, h)
 	local ic    = self.indexCount
 	local r, g, b, a = self.curR, self.curG, self.curB, self.curA
 	local tex   = self.curTexture
+	local u0, v0, u1, v1 = self.texU0, self.texV0, self.texU1, self.texV1
 
 	if vc > MAX_VERTICES - 4 then
 		error("lupa: geometry buffers are full")
@@ -403,28 +420,28 @@ function Draw:rect(x, y, w, h)
 
 	local v = verts[vc]
 	v.x, v.y, v.z = x, y, 0
-	v.u, v.v = 0, 0
+	v.u, v.v = u0, v1
 	v.nx, v.ny, v.nz = 0, 0, 1
 	v.r, v.g, v.b, v.a = r, g, b, a
 	v.textureIndex = tex
 
 	v = verts[vc + 1]
 	v.x, v.y, v.z = x + w, y, 0
-	v.u, v.v = 1, 0
+	v.u, v.v = u1, v1
 	v.nx, v.ny, v.nz = 0, 0, 1
 	v.r, v.g, v.b, v.a = r, g, b, a
 	v.textureIndex = tex
 
 	v = verts[vc + 2]
 	v.x, v.y, v.z = x, y + h, 0
-	v.u, v.v = 0, 1
+	v.u, v.v = u0, v0
 	v.nx, v.ny, v.nz = 0, 0, 1
 	v.r, v.g, v.b, v.a = r, g, b, a
 	v.textureIndex = tex
 
 	v = verts[vc + 3]
 	v.x, v.y, v.z = x + w, y + h, 0
-	v.u, v.v = 1, 1
+	v.u, v.v = u1, v0
 	v.nx, v.ny, v.nz = 0, 0, 1
 	v.r, v.g, v.b, v.a = r, g, b, a
 	v.textureIndex = tex
@@ -449,37 +466,37 @@ end
 --- counter-clockwise as seen from outside.
 
 ---@type number[]
-local CUBE_VERTICES = ffi.new("float[144]", {
+local CUBE_VERTICES = ffi.new("float[192]", {
 	-- +Z
-	-0.5, -0.5,  0.5,  0,  0,  1,
-	 0.5, -0.5,  0.5,  0,  0,  1,
-	 0.5,  0.5,  0.5,  0,  0,  1,
-	-0.5,  0.5,  0.5,  0,  0,  1,
+	-0.5, -0.5,  0.5,  0,  0,  1,  0, 1,
+	 0.5, -0.5,  0.5,  0,  0,  1,  1, 1,
+	 0.5,  0.5,  0.5,  0,  0,  1,  1, 0,
+	-0.5,  0.5,  0.5,  0,  0,  1,  0, 0,
 	-- -Z
-	 0.5, -0.5, -0.5,  0,  0, -1,
-	-0.5, -0.5, -0.5,  0,  0, -1,
-	-0.5,  0.5, -0.5,  0,  0, -1,
-	 0.5,  0.5, -0.5,  0,  0, -1,
+	 0.5, -0.5, -0.5,  0,  0, -1,  0, 1,
+	-0.5, -0.5, -0.5,  0,  0, -1,  1, 1,
+	-0.5,  0.5, -0.5,  0,  0, -1,  1, 0,
+	 0.5,  0.5, -0.5,  0,  0, -1,  0, 0,
 	-- +X
-	 0.5, -0.5,  0.5,  1,  0,  0,
-	 0.5, -0.5, -0.5,  1,  0,  0,
-	 0.5,  0.5, -0.5,  1,  0,  0,
-	 0.5,  0.5,  0.5,  1,  0,  0,
+	 0.5, -0.5,  0.5,  1,  0,  0,  0, 1,
+	 0.5, -0.5, -0.5,  1,  0,  0,  1, 1,
+	 0.5,  0.5, -0.5,  1,  0,  0,  1, 0,
+	 0.5,  0.5,  0.5,  1,  0,  0,  0, 0,
 	-- -X
-	-0.5, -0.5, -0.5, -1,  0,  0,
-	-0.5, -0.5,  0.5, -1,  0,  0,
-	-0.5,  0.5,  0.5, -1,  0,  0,
-	-0.5,  0.5, -0.5, -1,  0,  0,
+	-0.5, -0.5, -0.5, -1,  0,  0,  0, 1,
+	-0.5, -0.5,  0.5, -1,  0,  0,  1, 1,
+	-0.5,  0.5,  0.5, -1,  0,  0,  1, 0,
+	-0.5,  0.5, -0.5, -1,  0,  0,  0, 0,
 	-- +Y
-	-0.5,  0.5,  0.5,  0,  1,  0,
-	 0.5,  0.5,  0.5,  0,  1,  0,
-	 0.5,  0.5, -0.5,  0,  1,  0,
-	-0.5,  0.5, -0.5,  0,  1,  0,
+	-0.5,  0.5,  0.5,  0,  1,  0,  0, 1,
+	 0.5,  0.5,  0.5,  0,  1,  0,  1, 1,
+	 0.5,  0.5, -0.5,  0,  1,  0,  1, 0,
+	-0.5,  0.5, -0.5,  0,  1,  0,  0, 0,
 	-- -Y
-	-0.5, -0.5, -0.5,  0, -1,  0,
-	 0.5, -0.5, -0.5,  0, -1,  0,
-	 0.5, -0.5,  0.5,  0, -1,  0,
-	-0.5, -0.5,  0.5,  0, -1,  0,
+	-0.5, -0.5, -0.5,  0, -1,  0,  0, 1,
+	 0.5, -0.5, -0.5,  0, -1,  0,  1, 1,
+	 0.5, -0.5,  0.5,  0, -1,  0,  1, 0,
+	-0.5, -0.5,  0.5,  0, -1,  0,  0, 0,
 })
 
 ---@type ffi.cdata*
@@ -493,11 +510,11 @@ local CUBE_INDICES = ffi.new("int[36]", {
 })
 
 ---@type ffi.cdata*
-local PLANE_VERTICES = ffi.new("float[24]", {
-	-0.5, 0,  0.5,  0, 1, 0,
-	 0.5, 0,  0.5,  0, 1, 0,
-	 0.5, 0, -0.5,  0, 1, 0,
-	-0.5, 0, -0.5,  0, 1, 0,
+local PLANE_VERTICES = ffi.new("float[32]", {
+	-0.5, 0,  0.5,  0, 1, 0,  0, 1,
+	 0.5, 0,  0.5,  0, 1, 0,  1, 1,
+	 0.5, 0, -0.5,  0, 1, 0,  1, 0,
+	-0.5, 0, -0.5,  0, 1, 0,  0, 0,
 })
 
 ---@type ffi.cdata*
@@ -518,7 +535,7 @@ local function sphereMesh(segments, rings)
 
 	local vcount = (rings + 1) * (segments + 1)
 	local icount = rings * segments * 6
-	local verts = ffi.new("float[?]", vcount * 6)
+	local verts = ffi.new("float[?]", vcount * 8)
 	local indices = ffi.new("int[?]", icount)
 	local stride = segments + 1
 
@@ -539,7 +556,10 @@ local function sphereMesh(segments, rings)
 			verts[v + 3] = x * 2
 			verts[v + 4] = y * 2
 			verts[v + 5] = z * 2
-			v = v + 6
+			-- Equirectangular UVs, so a plain image wraps around the sphere.
+			verts[v + 6] = seg / segments
+			verts[v + 7] = ring / rings
+			v = v + 8
 		end
 	end
 
@@ -597,6 +617,15 @@ local function emitMesh(self, verts, indices, vcount, icount, px, py, pz, sx, sy
 	local r, g, b, a = self.curR, self.curG, self.curB, self.curA
 	local tex = self.curTexture
 
+	-- A non-default sampled rectangle remaps the mesh's own UVs. Checked once,
+	-- outside the vertex loops, so ordinary draws pay nothing for it.
+	local remapUV = not self.texDefault
+	local ru0, rv0, ruSpan, rvSpan
+	if remapUV then
+		ru0, rv0 = self.texU0, self.texV0
+		ruSpan, rvSpan = self.texU1 - self.texU0, self.texV1 - self.texV0
+	end
+
 	-- The transform / no-transform split is hoisted out of the vertex loop so
 	-- each loop is a straight-line trace with no per-vertex branch. This is the
 	-- hottest 3D path: it runs once per vertex of every mesh in the frame.
@@ -610,13 +639,17 @@ local function emitMesh(self, verts, indices, vcount, icount, px, py, pz, sx, sy
 		for i = 0, vcount - 1 do
 			local x, y, z = verts[j] * sx, verts[j + 1] * sy, verts[j + 2] * sz
 			local nx, ny, nz = verts[j + 3], verts[j + 4], verts[j + 5]
-			j = j + 6
+			local u, w = verts[j + 6], verts[j + 7]
+			j = j + 8
+			if remapUV then
+				u, w = ru0 + u * ruSpan, rv0 + w * rvSpan
+			end
 
 			local v = out[base + i]
 			v.x = m00 * x + m01 * y + m02 * z + m03 + px
 			v.y = m10 * x + m11 * y + m12 * z + m13 + py
 			v.z = m20 * x + m21 * y + m22 * z + m23 + pz
-			v.u, v.v = 0, 0
+			v.u, v.v = u, w
 			-- Normals get the same rotation; for non-uniform scale this is an
 			-- approximation, and the shader renormalises.
 			v.nx = m00 * nx + m01 * ny + m02 * nz
@@ -632,11 +665,15 @@ local function emitMesh(self, verts, indices, vcount, icount, px, py, pz, sx, sy
 			v.x = verts[j] * sx + px
 			v.y = verts[j + 1] * sy + py
 			v.z = verts[j + 2] * sz + pz
-			v.u, v.v = 0, 0
+			local u, w = verts[j + 6], verts[j + 7]
+			if remapUV then
+				u, w = ru0 + u * ruSpan, rv0 + w * rvSpan
+			end
+			v.u, v.v = u, w
 			v.nx, v.ny, v.nz = verts[j + 3], verts[j + 4], verts[j + 5]
 			v.r, v.g, v.b, v.a = r, g, b, a
 			v.textureIndex = tex
-			j = j + 6
+			j = j + 8
 		end
 	end
 
@@ -832,6 +869,22 @@ function Draw:sphere(x, y, z, radius, segments)
 	emitMesh(self, verts, indices, vcount, icount, x, y, z, s, s, s)
 end
 
+--- Draw a mesh built with Draw:createMesh or loaded with Assets:obj, at a
+--- position, optionally scaled. The current model matrix and colour apply as
+--- they do for the built-in primitives.
+---@param mesh lupa.Mesh
+---@param x number?
+---@param y number?
+---@param z number?
+---@param sx number?
+---@param sy number?
+---@param sz number?
+function Draw:mesh(mesh, x, y, z, sx, sy, sz)
+	local s = sx or 1
+	emitMesh(self, mesh.vertices, mesh.indices, mesh.vertexCount, mesh.indexCount,
+		x or 0, y or 0, z or 0, s, sy or s, sz or s)
+end
+
 --- Horizontal plane spanning `width` on X and `depth` on Z, centred on (x, y, z).
 ---@param x number
 ---@param y number
@@ -867,6 +920,85 @@ end
 --- Back to unlit: vertex colours are used directly.
 function Draw:clearLight()
 	self.lighting.lightEnabled = 0.0
+end
+
+-- ===========================================================================
+-- Textures
+-- ===========================================================================
+
+--- Upload RGBA8 pixels into the next free layer of the texture array and return
+--- the layer index. `pixels` must be width * height * 4 bytes.
+---
+--- The array is fixed at MAX_TEXTURES layers of MAX_TEXTURE_WIDTH x
+--- MAX_TEXTURE_HEIGHT; larger images have to be scaled down before they get
+--- here (Assets:image does that for you).
+---@param width number
+---@param height number
+---@param pixels ffi.cdata*
+---@return number layer
+function Draw:addTexture(width, height, pixels)
+	local layer = self.textureLayers
+	if layer >= MAX_TEXTURES then
+		error("lupa: texture array is full (" .. MAX_TEXTURES .. " layers)")
+	end
+	if width > MAX_TEXTURE_WIDTH or height > MAX_TEXTURE_HEIGHT then
+		error(string.format(
+			"lupa: texture %dx%d exceeds the %dx%d layer size",
+			width, height, MAX_TEXTURE_WIDTH, MAX_TEXTURE_HEIGHT))
+	end
+
+	self.textureLayers = layer + 1
+	self.device.queue:writeTexture(self.texture, {
+		width = width,
+		height = height,
+		layer = layer,
+		bytesPerRow = width * 4,
+	}, pixels)
+
+	return layer
+end
+
+--- Draw everything after this with `texture` sampled. Accepts a texture handle
+--- or a raw layer index; nil goes back to untextured.
+---@param texture table|number|nil
+function Draw:setTexture(texture)
+	if texture == nil then
+		self.curTexture = -1
+	elseif type(texture) == "number" then
+		self.curTexture = texture
+	else
+		self.curTexture = texture.layer
+	end
+	self.texU0, self.texV0, self.texU1, self.texV1 = 0, 0, 1, 1
+	self.texDefault = true
+end
+
+--- Stop sampling a texture: shapes go back to flat vertex colour.
+function Draw:clearTexture()
+	self.curTexture = -1
+	self.texU0, self.texV0, self.texU1, self.texV1 = 0, 0, 1, 1
+	self.texDefault = true
+end
+
+--- Choose which part of the texture maps onto each shape. `(u0, v0)` is the
+--- top-left of the source rectangle and `(u1, v1)` the bottom-right, in image
+--- coordinates.
+---
+---   draw:setTextureRect(0.25, 0.0, 0.5, 0.5)   -- one cell of a sprite sheet
+---   draw:setTextureRect(0, 0, 8, 4)            -- tile 8 by 4
+---
+--- Values past 1 repeat rather than clamp, because the sampler address mode is
+--- repeat, so tiling is simply a rectangle larger than the texture.
+---
+--- Unlike the texture itself, this is per draw call: a sheet can be sliced into
+--- as many different cells as you like within one frame.
+---@param u0 number
+---@param v0 number
+---@param u1 number
+---@param v1 number
+function Draw:setTextureRect(u0, v0, u1, v1)
+	self.texU0, self.texV0, self.texU1, self.texV1 = u0, v0, u1, v1
+	self.texDefault = (u0 == 0 and v0 == 0 and u1 == 1 and v1 == 1)
 end
 
 function Draw:line()
@@ -963,6 +1095,11 @@ function Draw:endFrame()
 	-- upload is skipped. A frame that drew meshes wrote its own indices.
 	if self.meshIndexCount > 0 then
 		encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
+	end
+
+	if self.uvScalesDirty then
+		encoder:writeBuffer(self.uvScalesBuffer, 512 * 4, self.uvScales)
+		self.uvScalesDirty = false
 	end
 
 	local renderDesc = self.renderDesc

@@ -34,8 +34,9 @@ function lupa.run(app)
 		isRunning = false
 	end
 
-	local assets = Assets.new()
+	-- draw first: Assets uploads images into draw's texture array.
 	local draw = Draw.new(window)
+	local assets = Assets.new(draw)
 	local input = Input.new()
 
 	app:start(assets)
