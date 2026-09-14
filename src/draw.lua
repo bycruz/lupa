@@ -179,7 +179,7 @@ function Draw.new(window)
 	end
 	table.sort(layoutEntries, function(a, b) return a.binding < b.binding end)
 
-	bindGroupLayout = device:createBindGroupLayout(layoutEntries)
+	local bindGroupLayout = device:createBindGroupLayout(layoutEntries)
 
 	-- Build bind group entries
 	local bgEntries = {
@@ -377,9 +377,14 @@ end
 
 ---@private
 function Draw:endFrame()
-	local proj = lpmath.mat4.ortho(0, self.window.width, 0, self.window.height, -1, 1)
+	-- The projection only depends on the window size, so it is rebuilt only
+	-- when that changes rather than allocating a fresh matrix every frame.
+	local width, height = self.window.width, self.window.height
 	local transforms = self.transforms
-	transforms.viewProj = proj
+	if self.projWidth ~= width or self.projHeight ~= height then
+		self.projWidth, self.projHeight = width, height
+		transforms.viewProj = lpmath.mat4.ortho(0, width, 0, height, -1, 1)
+	end
 	transforms.model = self.identityModel
 
 	local lighting = self.lighting
@@ -391,7 +396,11 @@ function Draw:endFrame()
 		return
 	end
 
-	local encoder = self.device:createCommandEncoder()
+	-- Ask the swapchain for the encoder, so hood reuses the command buffer it
+	-- pre-allocated for this frame slot. Going through the device instead
+	-- allocates a fresh command pool and command buffer every frame and never
+	-- frees them.
+	local encoder = self.swapchain:createCommandEncoder()
 	encoder:writeBuffer(self.transformsBuffer, TransformsSize, transforms)
 	encoder:writeBuffer(self.lightingBuffer, LightingSize, lighting)
 	encoder:writeBuffer(self.vertexBuffer, VertexArraySize * self.vertexCount, self.vertices)
@@ -401,7 +410,7 @@ function Draw:endFrame()
 	encoder:beginRendering(renderDesc)
 	encoder:setPipeline(self.pipeline)
 	encoder:setBindGroup(0, self.bindGroup)
-	encoder:setViewport(0, 0, self.window.width, self.window.height)
+	encoder:setViewport(0, 0, width, height)
 	encoder:setVertexBuffer(0, self.vertexBuffer)
 	encoder:setIndexBuffer(self.indexBuffer, "u16")
 	encoder:drawIndexed(self.indexCount, 1, 0, 0, 0)
