@@ -6,7 +6,7 @@ local CW, CH                       = W / COLS, H / ROWS
 
 local sin, sqrt, abs, min, max, pi = math.sin, math.sqrt, math.abs, math.min, math.max, math.pi
 
--- Plasma always uses s=0.85, l=0.5, so p/q/qp are constants
+-- Plasma always uses s=0.85 and l=0.5, so these are constants
 local Q                            = 0.925
 local P                            = 0.075
 local QP                           = 0.85

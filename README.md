@@ -168,8 +168,15 @@ still works.
 
 ## Tests
 
-`bench/` has verification scenarios that check emitted geometry without needing
-to inspect the screen: `verify3d`, `verifytex`, `verifymesh`.
+`lde test` runs the suite in `tests/`. Rendering runs headless: a frame is drawn
+into an offscreen target and read back, so the drawing API is checked by pixels
+rather than by eye.
+
+## Style
+
+`STYLE.md` is the guide this code is written to: full LuaCATS typing, cached FFI
+types, and comments only where they record an invariant that would otherwise look
+like a mistake.
 
 ## Usage
 

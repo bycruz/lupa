@@ -5,9 +5,7 @@
 local test = require("lde-test")
 local obj = require("lupa.obj")
 
----@param text string
----@return number[] vertices
----@return number[] indices
+---@type fun(text: string): number[], number[]
 local function parse(text)
 	return obj.parse(text)
 end

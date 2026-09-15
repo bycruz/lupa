@@ -1,9 +1,4 @@
---- 3D demo: orbiting camera, lit ground plane, a ring of spinning cubes and a
---- couple of spheres. Press 1 for the 3D scene, 2 for a 2D scene drawn through
---- the same draw object, escape to quit.
----
---- Note that the projection is per frame: a single frame is either 3D or 2D,
---- because there is one transforms uniform. See the README.
+--- 3D demo: 1 for the lit 3D scene, 2 for a 2D scene, escape to quit.
 local lupa = require("lupa")
 
 local TAU = math.pi * 2
@@ -24,7 +19,7 @@ local function hsl(h)
 	elseif i == 3 then r, g, b = 0, x, 1
 	elseif i == 4 then r, g, b = x, 0, 1
 	else r, g, b = 1, 0, x end
-	-- pastel: pull towards the mid range so the lighting reads well
+	-- pastel: pulled towards the mid range so the lighting reads
 	return 0.3 + r * 0.55, 0.3 + g * 0.55, 0.3 + b * 0.55
 end
 
@@ -32,10 +27,10 @@ function App:start(assets)
 	self.time = 0
 	self.mode = 1
 
-	-- A mesh loaded from an .obj, drawn alongside the built-in primitives.
+	-- A mesh loaded from an .obj, beside the built-in primitives.
 	self.torus = assets:obj("assets/torus.obj")
 
-	-- Deterministic ring of cubes, no randomness so runs are reproducible.
+	-- Deterministic ring of cubes, so runs are reproducible.
 	self.cubes = {}
 	for i = 1, 64 do
 		local a = (i / 64) * TAU

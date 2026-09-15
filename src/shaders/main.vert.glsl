@@ -1,16 +1,6 @@
 #version 450
 
-// Vertex stage for instanced mesh draws.
-//
-// The immediate path bakes the model transform into the vertices on the CPU,
-// which is why the non-instanced mesh path never needs a matrix here. This path
-// instead uploads a mesh's vertices once and applies a per-instance matrix in
-// the shader, so drawing a mesh N times costs N instance records rather than N
-// copies of every vertex.
-//
-// The fragment stage is shared with the immediate path, so the varyings here
-// match main.vert.glsl exactly.
-
+// safety: Vulkan binds through descriptor set 0, OpenGL through a bare binding
 #ifndef VULKAN
 out gl_PerVertex {
     vec4 gl_Position;
@@ -20,30 +10,20 @@ out gl_PerVertex {
 #define BINDING(x) layout(set = 0, binding = x)
 #endif
 
-// Binding 0: the mesh's own vertices, 24 bytes each: position, the normal as
-// four signed normalized bytes, then uv. The normal is normalized below, so the
-// step size of the narrow form does not survive into the lighting.
+// A mesh vertex: position, uv, and the normal as normalized bytes.
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec4 a_normal;
 
-// Binding 1: one element per instance, 76 bytes: the world matrix, color,
-// texture index and the sampled rectangle.
-//
-// The matrix arrives as its three linear columns plus the translation column.
-// An affine matrix -- which is all the model stack builds -- has (0, 0, 0, 1)
-// as its fourth row, so that row is put back here rather than uploaded as four
-// zeroes per instance.
+// One instance: the world matrix, its color, its texture layer and the sampled
+// rectangle. safety: the matrix is affine, so its fourth row is (0, 0, 0, 1) and
+// is put back here rather than uploaded as four zeroes per instance.
 layout(location = 3) in vec3 a_model0;
 layout(location = 4) in vec3 a_model1;
 layout(location = 5) in vec3 a_model2;
 layout(location = 6) in vec4 a_model3;
-// Normalized bytes, so this reads as a 0..1 color.
 layout(location = 7) in vec4 a_color;
 layout(location = 8) in float a_textureIndex;
-
-// The sampled rectangle, in the same (u0, v0, spanU, spanV) form the immediate
-// path bakes into vertices, so setTextureRect applies to instances too.
 layout(location = 9) in vec4 a_uvRect;
 
 layout(location = 0) out vec2 v_uv;

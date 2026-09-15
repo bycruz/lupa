@@ -14,6 +14,7 @@
 		"path": ["./target/?.lua", "./target/?/init.lua"]
 	},
 	"workspace": {
-		"library": ["target"]
+		"library": ["target"],
+		"ignoreDir": ["target"]
 	}
 }

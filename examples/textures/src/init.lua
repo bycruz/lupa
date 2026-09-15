@@ -1,8 +1,4 @@
---- Texture demo. Press 1 for 2D sprites, 2 for textured 3D objects, escape to
---- quit.
----
---- The image is 128x128 with a white bar near its top edge, so an upside-down
---- or UV-swapped draw is immediately obvious.
+--- Texture demo: 1 for 2D sprites, 2 for textured 3D, escape to quit.
 local lupa = require("lupa")
 local ffi = require("ffi")
 
@@ -16,8 +12,7 @@ function App:start(assets)
 	self.mode = 1
 	self.tex = assets:image("assets/test.png")
 
-	-- A procedurally built texture, to show the raw-pixel path: a 32x32
-	-- magenta/black checkerboard.
+	-- A procedurally built texture, for the raw-pixel path.
 	local px = ffi.new("uint8_t[?]", 32 * 32 * 4)
 	for y = 0, 31 do
 		for x = 0, 31 do
@@ -70,14 +65,12 @@ function App:draw(draw)
 		draw:setTexture(self.checker)
 		draw:rect(40, 40, 520, 300)
 
-		-- Tiling: the sampled rectangle is allowed to run past the texture, and
-		-- the sampler repeats.
+		-- Tiling: the sampled rectangle runs past the texture and the sampler repeats.
 		draw:setColor(1, 1, 1, 1)
 		draw:setTextureRect(0, 0, 8, 5)
 		draw:rect(640, 40, 520, 300)
 
-		-- Sprite sheet: four cells of the same texture in one frame. The
-		-- rectangle is per draw call, so this needs no extra state.
+		-- Sprite sheet: the sampled rectangle is per draw call.
 		draw:setTexture(self.tex)
 		for cell = 0, 3 do
 			local cx = cell % 2
@@ -88,8 +81,7 @@ function App:draw(draw)
 		return
 	end
 
-	-- 3D: meshes carry their own UVs, and the sampled rectangle remaps them, so
-	-- the same image tiles across a plane.
+	-- 3D: the sampled rectangle remaps each mesh's own UVs, so the image tiles.
 	draw:setCamera({
 		position = { x = cos(t * 0.35) * 16, y = 6, z = sin(t * 0.35) * 16 },
 		target = { x = 0, y = 0, z = 0 },

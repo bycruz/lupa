@@ -1,15 +1,7 @@
---- The matrix helpers the projection and the model stack are built on.
----
---- These are pure, so they run anywhere; the values matter because the 2D view's
---- orientation and the rect instance matrices both fall out of them.
 local test = require("lde-test")
 local lpmath = require("lupa.math")
 
----@param m lupa.math.Mat4
----@param x number
----@param y number
----@param z number
----@return number, number, number, number
+---@type fun(m: lupa.math.Mat4, x: number, y: number, z: number): number, number, number, number
 local function apply(m, x, y, z)
 	local e = m.m
 	return e[0] * x + e[4] * y + e[8] * z + e[12],
@@ -18,20 +10,18 @@ local function apply(m, x, y, z)
 		e[3] * x + e[7] * y + e[11] * z + e[15]
 end
 
-test.it("math: identity leaves a point alone", function()
-	local x, y, z, w = apply(lpmath.mat4.identity(), 3, -4, 5)
-	test.equal(x, 3) test.equal(y, -4) test.equal(z, 5) test.equal(w, 1)
-end)
-
---- The matrices are stored as f32, so comparisons need a tolerance: a corner
---- that should be exactly 1 comes back a hair under.
----@param a number
----@param b number
+--- The matrices are stored as f32, so comparisons need a tolerance.
+---@type fun(a: number, b: number)
 local function almostEqual(a, b)
 	if math.abs(a - b) > 1e-5 then
 		error(string.format("expected %g to be %g", a, b))
 	end
 end
+
+test.it("math: identity leaves a point alone", function()
+	local x, y, z, w = apply(lpmath.mat4.identity(), 3, -4, 5)
+	test.equal(x, 3) test.equal(y, -4) test.equal(z, 5) test.equal(w, 1)
+end)
 
 test.it("math: ortho maps the window corners to the clip cube", function()
 	local m = lpmath.mat4.ortho(0, 800, 0, 600, -1, 1)
@@ -46,8 +36,6 @@ end)
 test.it("math: ortho puts y = 0 at the bottom", function()
 	local m = lpmath.mat4.ortho(0, 800, 0, 600, -1, 1)
 
-	-- Half way up the window is half way up the clip cube: bigger y is higher on
-	-- screen, which is what the 2D drawing API promises.
 	local _, low = apply(m, 0, 100, 0)
 	local _, high = apply(m, 0, 500, 0)
 	test.less(low, high)
@@ -82,4 +70,17 @@ test.it("math: multiplying by identity changes nothing", function()
 	local bx, by = apply(product, 123, 456, 0)
 	test.equal(ax, bx)
 	test.equal(ay, by)
+end)
+
+test.it("math: ortho written over a perspective leaves none of it behind", function()
+	-- safety: the frame's viewProj is written in place, so an ortho drawn after a
+	-- camera would keep the camera's terms if the write missed any of them
+	local m = lpmath.mat4.perspective(math.pi / 3, 16 / 9, 0.1, 100)
+	lpmath.mat4.orthoInto(m, 0, 800, 0, 600, -1, 1)
+
+	local x, y, z, w = apply(m, 800, 600, 0)
+	almostEqual(x, 1)
+	almostEqual(y, 1)
+	almostEqual(z, 0.5)
+	almostEqual(w, 1)
 end)

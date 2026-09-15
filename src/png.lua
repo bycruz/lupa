@@ -1,8 +1,4 @@
---- Minimal PNG decoder: 8- and 16-bit, non-interlaced, color types 0/2/3/4/6.
----
---- Deliberately dependency-free: it parses the chunks itself and uses the
---- system zlib's one-shot `uncompress` for the IDAT stream, so there is no
---- build step and no C module to ship.
+--- Minimal PNG decoder, 8- and 16-bit non-interlaced, over the system zlib.
 local ffi = require("ffi")
 
 ffi.cdef [[
@@ -12,30 +8,53 @@ ffi.cdef [[
 
 local zlib = ffi.load("z")
 
+---@type ffi.ctype* unsigned char[?]
+local byteArray = ffi.typeof("unsigned char[?]")
+
+---@type ffi.ctype* unsigned long[?]
+local ulongArray = ffi.typeof("unsigned long[?]")
+
+---@type ffi.ctype* uint8_t[?]
+local rgbaArray = ffi.typeof("uint8_t[?]")
+
+---@type ffi.ctype* unsigned byte pointer, for ffi.cast
+local bytePointer = ffi.typeof("const unsigned char*")
+
 local PNG_SIGNATURE = "\137PNG\r\n\26\n"
+
+--- Channels per pixel and where each channel sits, by PNG color type. Type 3 is
+--- the palette, whose colors come from the PLTE chunk.
+local FORMAT = {
+	[0] = { channels = 1, gray = true },
+	[2] = { channels = 3, r = 0, g = 1, b = 2 },
+	[3] = { channels = 1 },
+	[4] = { channels = 2, gray = true, a = 1 },
+	[6] = { channels = 4, r = 0, g = 1, b = 2, a = 3 },
+}
 
 local M = {}
 
----@param s string
----@param i number 1-based
+---@type fun(s: string, i: number): number
 local function u32(s, i)
 	local a, b, c, d = s:byte(i, i + 3)
 	return a * 16777216 + b * 65536 + c * 256 + d
 end
 
+---@type fun(a: number, b: number, c: number): number
 local function paeth(a, b, c)
 	local p = a + b - c
 	local pa, pb, pc = math.abs(p - a), math.abs(p - b), math.abs(p - c)
-	if pa <= pb and pa <= pc then return a end
-	if pb <= pc then return b end
+	if pa <= pb and pa <= pc then
+		return a
+	elseif pb <= pc then
+		return b
+	end
 	return c
 end
 
---- Undo the per-scanline filters in place. `raw` holds height * stride bytes,
---- each scanline prefixed with its filter type byte.
+--- Undo the per-scanline filters in place.
+---@type fun(raw: ffi.cdata*, height: number, stride: number, bpp: number)
 local function unfilter(raw, height, stride, bpp)
-	-- Each scanline is its filter byte followed by `stride` bytes of data, so
-	-- the row pitch is stride + 1, not stride.
 	local pitch = stride + 1
 	for y = 0, height - 1 do
 		local row = y * pitch
@@ -44,7 +63,7 @@ local function unfilter(raw, height, stride, bpp)
 		local prev = cur - pitch
 
 		if filter == 0 then
-			-- nothing
+			-- no filter
 		elseif filter == 1 then
 			for x = bpp, stride - 1 do
 				raw[cur + x] = (raw[cur + x] + raw[cur + x - bpp]) % 256
@@ -74,8 +93,7 @@ local function unfilter(raw, height, stride, bpp)
 	end
 end
 
----@param data string raw file contents
----@return number width, number height, ffi.cdata* rgba
+---@type fun(data: string): number, number, ffi.cdata*
 function M.decode(data)
 	if #data < 8 or data:sub(1, 8) ~= PNG_SIGNATURE then
 		error("not a PNG file (bad signature)")
@@ -119,34 +137,28 @@ function M.decode(data)
 		error("interlaced PNGs are not supported")
 	end
 	if bitDepth ~= 8 and bitDepth ~= 16 then
-		error("unsupported PNG bit depth " .. tostring(bitDepth) ..
-			" (1, 2 and 4 are not supported)")
+		error("unsupported PNG bit depth " .. tostring(bitDepth) .. " (1, 2 and 4 are not supported)")
 	end
 
-	local channels
-	if colorType == 0 then channels = 1
-	elseif colorType == 2 then channels = 3
-	elseif colorType == 3 then channels = 1
-	elseif colorType == 4 then channels = 2
-	elseif colorType == 6 then channels = 4
-	else
+	local format = FORMAT[colorType]
+	if not format then
 		error("unsupported PNG color type " .. tostring(colorType))
 	end
 
-	local bpp = channels * (bitDepth / 8)
+	local bpp = format.channels * (bitDepth / 8)
 	local stride = width * bpp
 	local rawLen = height * (stride + 1)
 
 	local compressed = table.concat(idat)
-	local src = ffi.cast("const unsigned char *", compressed)
-	local raw = ffi.new("unsigned char[?]", rawLen)
-	local outLen = ffi.new("unsigned long[1]", rawLen)
+	local src = ffi.cast(bytePointer, compressed)
+	local raw = byteArray(rawLen)
+	local outLen = ulongArray(1, rawLen)
 
 	local result = zlib.uncompress(raw, outLen, src, #compressed)
 	if result ~= 0 then
-		-- The buffer may simply have been too small; retry with slack.
-		local bigger = ffi.new("unsigned char[?]", rawLen + 4096)
-		local biggerLen = ffi.new("unsigned long[1]", rawLen + 4096)
+		-- safety: the buffer may simply have been too small, so retry with slack
+		local bigger = byteArray(rawLen + 4096)
+		local biggerLen = ulongArray(1, rawLen + 4096)
 		result = zlib.uncompress(bigger, biggerLen, src, #compressed)
 		if result ~= 0 then
 			error("PNG IDAT stream failed to inflate (zlib error " .. result .. ")")
@@ -156,36 +168,35 @@ function M.decode(data)
 
 	unfilter(raw, height, stride, bpp)
 
-	-- Expand to tightly packed RGBA8.
-	local pixels = ffi.new("uint8_t[?]", width * height * 4)
-	local high = bitDepth == 16 and 2 or 1 -- step between samples
+	local pixels = rgbaArray(width * height * 4)
+	local step = bitDepth == 16 and 2 or 1
+	local pitch = stride + 1
 	local out = 0
 
-	local pitch = stride + 1
 	for y = 0, height - 1 do
 		local row = y * pitch + 1
 		for x = 0, width - 1 do
 			local base = row + x * bpp
 			local r, g, b, a
 
-			if colorType == 6 then
-				r, g, b, a = raw[base], raw[base + high], raw[base + high * 2], raw[base + high * 3]
-			elseif colorType == 2 then
-				r, g, b, a = raw[base], raw[base + high], raw[base + high * 2], 255
-			elseif colorType == 4 then
-				r = raw[base]; g = r; b = r; a = raw[base + high]
-			elseif colorType == 0 then
-				r = raw[base]; g = r; b = r; a = 255
-			else -- palette
-				local idx = raw[base]
-				if idx >= paletteLen then
+			if colorType == 3 then
+				local index = raw[base]
+				if not palette or index >= paletteLen then
 					r, g, b, a = 0, 0, 0, 255
 				else
-					local p = idx * 3 + 1
-					r, g, b = palette:byte(p, p + 2)
-					a = (paletteAlpha and idx < #paletteAlpha)
-						and paletteAlpha:byte(idx + 1) or 255
+					local at = index * 3 + 1
+					r, g, b = palette:byte(at, at + 2)
+					a = (paletteAlpha and index < #paletteAlpha) and paletteAlpha:byte(index + 1) or 255
 				end
+			elseif format.gray then
+				r = raw[base]
+				g, b = r, r
+				a = format.a and raw[base + format.a * step] or 255
+			else
+				r = raw[base + format.r * step]
+				g = raw[base + format.g * step]
+				b = raw[base + format.b * step]
+				a = format.a and raw[base + format.a * step] or 255
 			end
 
 			pixels[out] = r

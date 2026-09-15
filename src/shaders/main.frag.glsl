@@ -33,6 +33,8 @@ BINDING(1) uniform Lighting {
     float _pad2;
 };
 
+// safety: a texture is sampled through a separate sampler object on Vulkan and
+// through the texture's own unit on OpenGL
 #ifndef VULKAN
 BINDING(2) uniform TEXTURE2D_ARRAY u_textures;
 #else
@@ -40,12 +42,8 @@ BINDING(2) uniform texture2DArray u_textures;
 BINDING(3) uniform sampler u_sampler;
 #endif
 
-// One entry per texture layer, holding the scale that turns queued UVs running
-// 0..1 into the part of the layer the image was uploaded to. std140 strides an
-// array of scalars or vectors by 16 bytes whatever the element type, so these
-// are declared as vec4 and only .xy is used: that way the spacing the shader
-// reads is the spacing the CPU writes, rather than one that depends on that rule
-// being remembered.
+// safety: declared as vec4 because std140 strides a uniform array by 16 bytes
+// whatever its element type, so the CPU writes the same spacing, and only .xy is used
 BINDING(4) uniform TextureScales {
     vec4 u_uvScales[256];
 };

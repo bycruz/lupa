@@ -1,12 +1,11 @@
---- A headless Draw, for tests that need to see what was drawn.
----
---- Nothing here needs a window: lupa renders into an offscreen target and the
---- frame is copied back to the CPU, so a test can assert on pixels through the
---- real path — projection, instancing, batching and all — anywhere the machine
---- can create a Vulkan device.
+--- A headless Draw, so a test can check what was drawn through the real path --
+--- projection, instancing and batching included -- anywhere a device exists.
 local Draw = require("lupa.draw")
 
 local M = {}
+
+--- A function returning the RGBA of one pixel, in the space the 2D view uses.
+---@alias tests.Pixels fun(x: number, y: number): number, number, number, number
 
 ---@class tests.Screen
 ---@field draw lupa.Draw
@@ -15,10 +14,7 @@ local M = {}
 local Screen = {}
 Screen.__index = Screen
 
----@param width number?
----@param height number?
----@return tests.Screen? screen
----@return string? error
+---@type fun(width: number?, height: number?): tests.Screen?, string?
 function M.new(width, height)
 	local ok, screenOrError = pcall(function()
 		return setmetatable({
@@ -48,13 +44,10 @@ function Screen:frame(paint)
 	self.draw:endFrame()
 end
 
---- Draw a frame and return an accessor for its pixels.
----
---- The accessor takes coordinates in the same space the 2D view uses: x from the
---- left, y counting up from the bottom. The capture comes back with rows from the
---- top, so the flip happens here once.
+--- Draw a frame and return an accessor for its pixels, in the same space the 2D
+--- view uses: x from the left, y counting up from the bottom.
 ---@param paint fun(draw: lupa.Draw)
----@return fun(x: number, y: number): number, number, number, number
+---@return tests.Pixels
 function Screen:render(paint)
 	self:frame(paint)
 
@@ -63,10 +56,34 @@ function Screen:render(paint)
 		error("lupa: the frame was not captured")
 	end
 
+	-- safety: the capture comes back with rows from the top, so the flip happens
+	-- here once instead of in every test
 	return function(x, y)
 		local i = ((height - 1 - y) * width + x) * 4 + 1
 		return string.byte(pixels, i), string.byte(pixels, i + 1),
 			string.byte(pixels, i + 2), string.byte(pixels, i + 3)
+	end
+end
+
+--- Assert the color at (x, y), to within the tolerance of reading a frame back
+--- through 8 bit channels.
+---@param pixels tests.Pixels
+---@param label string
+---@param x number
+---@param y number
+---@param r number 0..1
+---@param g number 0..1
+---@param b number 0..1
+function M.expectAt(pixels, label, x, y, r, g, b)
+	local pr, pg, pb = pixels(x, y)
+	local got = { pr, pg, pb }
+	local want = { r * 255, g * 255, b * 255 }
+
+	for i = 1, 3 do
+		if math.abs(got[i] - want[i]) > 8 then
+			error(string.format("%s: got (%d, %d, %d), want (%d, %d, %d)",
+				label, got[1], got[2], got[3], want[1], want[2], want[3]))
+		end
 	end
 end
 

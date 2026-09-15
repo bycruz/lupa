@@ -3,12 +3,9 @@ local ffi = require("ffi")
 ffi.cdef [[
     typedef struct { float m[16]; } LupaMat4;
     typedef struct { float x, y, z; } LupaVec3;
-    typedef struct { float x, y, z, w; } LupaVec4;
-    typedef struct { float x, y; } LupaVec2;
 ]]
 
-local mat4 = {}
-
+--- Column-major, indexed column * 4 + row.
 ---@class lupa.math.Mat4: ffi.cdata*
 ---@field m number[16]
 
@@ -17,35 +14,26 @@ local mat4 = {}
 ---@field y number
 ---@field z number
 
----@class lupa.math.Vec4: ffi.cdata*
----@field x number
----@field y number
----@field z number
----@field w number
+---@class lupa.math.Mat4Kit
+local mat4 = {}
 
----@class lupa.math.Vec2: ffi.cdata*
----@field x number
----@field y number
+---@class lupa.math.Vec3Kit
+---@field new fun(x: number, y: number, z: number): lupa.math.Vec3
 
 ---@type fun(): lupa.math.Mat4
+---@diagnostic disable-next-line: assign-type-mismatch
 local mat4Type = ffi.typeof("LupaMat4")
 
 ---@type fun(x: number, y: number, z: number): lupa.math.Vec3
+---@diagnostic disable-next-line: assign-type-mismatch
 local vec3Type = ffi.typeof("LupaVec3")
 
----@type fun(x: number, y: number, z: number, w: number): lupa.math.Vec4
-local vec4Type = ffi.typeof("LupaVec4")
-
----@type fun(x: number, y: number): lupa.math.Vec2
-local vec2Type = ffi.typeof("LupaVec2")
-
--- Column-major indexing helper: col * 4 + row
----@param row number
----@param col number
+---@type fun(row: number, col: number): number
 local function idx(row, col)
 	return col * 4 + row
 end
 
+---@type fun(): lupa.math.Mat4
 function mat4.identity()
 	local m = mat4Type()
 	m.m[idx(0, 0)] = 1
@@ -55,82 +43,110 @@ function mat4.identity()
 	return m
 end
 
+--- safety: every element is written, because the matrix may hold another
+--- projection and a leftover term would corrupt the result
+---@param dst lupa.math.Mat4
 ---@param left number
 ---@param right number
 ---@param bottom number
 ---@param top number
 ---@param near number
 ---@param far number
+---@return lupa.math.Mat4
+function mat4.orthoInto(dst, left, right, bottom, top, near, far)
+	local m = dst.m
+	m[idx(0, 0)] = 2 / (right - left)
+	m[idx(0, 1)] = 0
+	m[idx(0, 2)] = 0
+	m[idx(0, 3)] = -(right + left) / (right - left)
+	m[idx(1, 0)] = 0
+	m[idx(1, 1)] = 2 / (top - bottom)
+	m[idx(1, 2)] = 0
+	m[idx(1, 3)] = -(top + bottom) / (top - bottom)
+	m[idx(2, 0)] = 0
+	m[idx(2, 1)] = 0
+	m[idx(2, 2)] = 1 / (far - near)
+	m[idx(2, 3)] = -near / (far - near)
+	m[idx(3, 0)] = 0
+	m[idx(3, 1)] = 0
+	m[idx(3, 2)] = 0
+	m[idx(3, 3)] = 1
+	return dst
+end
+
+---@type fun(left: number, right: number, bottom: number, top: number, near: number, far: number): lupa.math.Mat4
 function mat4.ortho(left, right, bottom, top, near, far)
-	local m = mat4Type()
-	m.m[idx(0, 0)] = 2 / (right - left)
-	m.m[idx(1, 1)] = 2 / (top - bottom)
-	m.m[idx(2, 2)] = 1 / (far - near)
-	m.m[idx(0, 3)] = -(right + left) / (right - left)
-	m.m[idx(1, 3)] = -(top + bottom) / (top - bottom)
-	m.m[idx(2, 3)] = -near / (far - near)
-	m.m[idx(3, 3)] = 1
-	return m
+	return mat4.orthoInto(mat4Type(), left, right, bottom, top, near, far)
 end
 
----@param fovy number radians
----@param aspect number
----@param near number
----@param far number
-function mat4.perspective(fovy, aspect, near, far)
-	local m = mat4Type()
+---@type fun(dst: lupa.math.Mat4, fovy: number, aspect: number, near: number, far: number): lupa.math.Mat4
+function mat4.perspectiveInto(dst, fovy, aspect, near, far)
 	local tanHalf = math.tan(fovy / 2)
-	m.m[idx(0, 0)] = 1 / (aspect * tanHalf)
-	m.m[idx(1, 1)] = 1 / tanHalf
-	m.m[idx(2, 2)] = far / (near - far)
-	m.m[idx(2, 3)] = -(far * near) / (far - near)
-	m.m[idx(3, 2)] = -1
-	return m
+	local m = dst.m
+	m[idx(0, 0)] = 1 / (aspect * tanHalf)
+	m[idx(0, 1)] = 0
+	m[idx(0, 2)] = 0
+	m[idx(0, 3)] = 0
+	m[idx(1, 0)] = 0
+	m[idx(1, 1)] = 1 / tanHalf
+	m[idx(1, 2)] = 0
+	m[idx(1, 3)] = 0
+	m[idx(2, 0)] = 0
+	m[idx(2, 1)] = 0
+	m[idx(2, 2)] = far / (near - far)
+	m[idx(2, 3)] = -(far * near) / (far - near)
+	m[idx(3, 0)] = 0
+	m[idx(3, 1)] = 0
+	m[idx(3, 2)] = -1
+	m[idx(3, 3)] = 0
+	return dst
 end
 
----@param eye lupa.math.Vec3
----@param center lupa.math.Vec3
----@param up lupa.math.Vec3
-function mat4.lookAt(eye, center, up)
-	local fx = center.x - eye.x
-	local fy = center.y - eye.y
-	local fz = center.z - eye.z
+---@type fun(fovy: number, aspect: number, near: number, far: number): lupa.math.Mat4
+function mat4.perspective(fovy, aspect, near, far)
+	return mat4.perspectiveInto(mat4Type(), fovy, aspect, near, far)
+end
+
+---@type fun(dst: lupa.math.Mat4, eye: lupa.math.Vec3, center: lupa.math.Vec3, up: lupa.math.Vec3): lupa.math.Mat4
+function mat4.lookAtInto(dst, eye, center, up)
+	local fx, fy, fz = center.x - eye.x, center.y - eye.y, center.z - eye.z
 	local flen = math.sqrt(fx * fx + fy * fy + fz * fz)
 	fx, fy, fz = fx / flen, fy / flen, fz / flen
 
-	local rx = fy * up.z - fz * up.y
-	local ry = fz * up.x - fx * up.z
-	local rz = fx * up.y - fy * up.x
+	local rx, ry, rz = fy * up.z - fz * up.y, fz * up.x - fx * up.z, fx * up.y - fy * up.x
 	local rlen = math.sqrt(rx * rx + ry * ry + rz * rz)
 	rx, ry, rz = rx / rlen, ry / rlen, rz / rlen
 
-	local ux = ry * fz - rz * fy
-	local uy = rz * fx - rx * fz
-	local uz = rx * fy - ry * fx
+	local ux, uy, uz = ry * fz - rz * fy, rz * fx - rx * fz, rx * fy - ry * fx
 
-	local m = mat4Type()
-	m.m[idx(0, 0)] = rx
-	m.m[idx(0, 1)] = ry
-	m.m[idx(0, 2)] = rz
-	m.m[idx(1, 0)] = ux
-	m.m[idx(1, 1)] = uy
-	m.m[idx(1, 2)] = uz
-	m.m[idx(2, 0)] = -fx
-	m.m[idx(2, 1)] = -fy
-	m.m[idx(2, 2)] = -fz
-	m.m[idx(0, 3)] = -(rx * eye.x + ry * eye.y + rz * eye.z)
-	m.m[idx(1, 3)] = -(ux * eye.x + uy * eye.y + uz * eye.z)
-	m.m[idx(2, 3)] = (fx * eye.x + fy * eye.y + fz * eye.z)
-	m.m[idx(3, 3)] = 1
-	return m
+	local m = dst.m
+	m[idx(0, 0)] = rx
+	m[idx(0, 1)] = ry
+	m[idx(0, 2)] = rz
+	m[idx(1, 0)] = ux
+	m[idx(1, 1)] = uy
+	m[idx(1, 2)] = uz
+	m[idx(2, 0)] = -fx
+	m[idx(2, 1)] = -fy
+	m[idx(2, 2)] = -fz
+	m[idx(0, 3)] = -(rx * eye.x + ry * eye.y + rz * eye.z)
+	m[idx(1, 3)] = -(ux * eye.x + uy * eye.y + uz * eye.z)
+	m[idx(2, 3)] = fx * eye.x + fy * eye.y + fz * eye.z
+	m[idx(3, 0)] = 0
+	m[idx(3, 1)] = 0
+	m[idx(3, 2)] = 0
+	m[idx(3, 3)] = 1
+	return dst
 end
 
---- dst = a * b. `dst` may alias `a` or `b`: every element is read into a local
---- before anything is written. Unrolled because this is what a 3D transform
---- stack ends up calling, once per object.
----@param dst lupa.math.Mat4
----@param a lupa.math.Mat4
----@param b lupa.math.Mat4
+---@type fun(eye: lupa.math.Vec3, center: lupa.math.Vec3, up: lupa.math.Vec3): lupa.math.Mat4
+function mat4.lookAt(eye, center, up)
+	return mat4.lookAtInto(mat4Type(), eye, center, up)
+end
+
+--- dst = a * b, unrolled because the model stack calls it once per object.
+--- safety: dst may alias a or b, so every element is read into a local first
+---@type fun(dst: lupa.math.Mat4, a: lupa.math.Mat4, b: lupa.math.Mat4)
 function mat4.mulInto(dst, a, b)
 	local A, B, D = a.m, b.m, dst.m
 
@@ -165,44 +181,14 @@ function mat4.mulInto(dst, a, b)
 	D[15] = a30 * b03 + a31 * b13 + a32 * b23 + a33 * b33
 end
 
----@param a lupa.math.Mat4
----@param b lupa.math.Mat4
----@return lupa.math.Mat4
+---@type fun(a: lupa.math.Mat4, b: lupa.math.Mat4): lupa.math.Mat4
 function mat4.mul(a, b)
 	local m = mat4Type()
 	mat4.mulInto(m, a, b)
 	return m
 end
 
----@param tx number
----@param ty number
----@param tz number
-function mat4.translate(tx, ty, tz)
-	local m = mat4.identity()
-	m.m[idx(0, 3)] = tx
-	m.m[idx(1, 3)] = ty
-	m.m[idx(2, 3)] = tz
-	return m
-end
-
----@param sx number
----@param sy number
----@param sz number
-function mat4.scale(sx, sy, sz)
-	local m = mat4Type()
-	m.m[idx(0, 0)] = sx
-	m.m[idx(1, 1)] = sy
-	m.m[idx(2, 2)] = sz
-	m.m[idx(3, 3)] = 1
-	return m
-end
-
---- Write a rotation about `axis` into `m` without allocating.
----@param m lupa.math.Mat4
----@param angle number radians
----@param x number
----@param y number
----@param z number
+---@type fun(m: lupa.math.Mat4, angle: number, x: number, y: number, z: number): lupa.math.Mat4
 function mat4.rotateInto(m, angle, x, y, z)
 	local len = math.sqrt(x * x + y * y + z * z)
 	x, y, z = x / len, y / len, z / len
@@ -210,6 +196,7 @@ function mat4.rotateInto(m, angle, x, y, z)
 	local s = math.sin(angle)
 	local t = 1 - c
 	local e = m.m
+
 	e[idx(0, 0)] = t * x * x + c
 	e[idx(0, 1)] = t * x * y - s * z
 	e[idx(0, 2)] = t * x * z + s * y
@@ -229,38 +216,7 @@ function mat4.rotateInto(m, angle, x, y, z)
 	return m
 end
 
----@param angle number radians
----@param x number
----@param y number
----@param z number
----@return lupa.math.Mat4
-function mat4.rotate(angle, x, y, z)
-	return mat4.rotateInto(mat4Type(), angle, x, y, z)
-end
-
-local vec3 = {}
-vec3.new = vec3Type
-
----@param a lupa.math.Vec3
----@param b lupa.math.Vec3
-function vec3.cross(a, b)
-	return vec3Type(
-		a.y * b.z - a.z * b.y,
-		a.z * b.x - a.x * b.z,
-		a.x * b.y - a.y * b.x
-	)
-end
-
----@param a lupa.math.Vec3
----@param b lupa.math.Vec3
-function vec3.dot(a, b)
-	return a.x * b.x + a.y * b.y + a.z * b.z
-end
-
----@param a lupa.math.Vec3
-function vec3.normalize(a)
-	local len = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z)
-	return vec3Type(a.x / len, a.y / len, a.z / len)
-end
+---@type lupa.math.Vec3Kit
+local vec3 = { new = vec3Type }
 
 return { vec3 = vec3, mat4 = mat4 }
