@@ -6,7 +6,13 @@
 			"path": "../hood"
 		},
 		"winit": {
-			"git": "https://github.com/bycruz/winit"
+			"path": "../winit"
+		},
+		"vkapi": {
+			"path": "../vkapi"
+		},
+		"glapi": {
+			"path": "../glapi"
 		}
 	}
 }

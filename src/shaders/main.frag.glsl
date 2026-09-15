@@ -20,7 +20,6 @@ layout(location = 0) out vec4 out_color;
 
 BINDING(0) uniform Transforms {
     mat4 u_viewProj;
-    mat4 u_model;
 };
 
 BINDING(1) uniform Lighting {

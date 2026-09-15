@@ -30,14 +30,18 @@ end
 --- output directory. They are compiled on every build: lde only hashes src/,
 --- lde.json and build.lua, so reusing a previously compiled .spv would ship a
 --- stale shader after an edit, and shaders are tiny anyway.
+---
+--- `name` is the base of the .glsl file and the module it is written to, so
+--- main.vert.glsl becomes shaders/main/vert.lua.
+---@param name string e.g. "main"
 ---@param stage "vert" | "frag"
-local function embedShader(stage)
-	local name = "main." .. stage
-	local glslPath = "shaders" .. sep .. name .. ".glsl"
+local function embedShader(name, stage)
+	local file = name .. "." .. stage
+	local glslPath = "shaders" .. sep .. file .. ".glsl"
 	local sourcePath = glslPath
 
 	if not isOpengl then
-		sourcePath = name .. ".spv"
+		sourcePath = file .. ".spv"
 		build:sh(string.format('glslc -fshader-stage=%s "%s" -o "%s"', stage, glslPath, sourcePath))
 	end
 
@@ -46,8 +50,8 @@ local function embedShader(stage)
 		build:delete(sourcePath)
 	end
 
-	build:write("shaders" .. sep .. "main" .. sep .. stage .. ".lua", 'return "' .. toLuaLiteral(source) .. '"')
+	build:write("shaders" .. sep .. name .. sep .. stage .. ".lua", 'return "' .. toLuaLiteral(source) .. '"')
 end
 
-embedShader("vert")
-embedShader("frag")
+embedShader("main", "vert")
+embedShader("main", "frag")
