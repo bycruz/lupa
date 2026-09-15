@@ -20,17 +20,25 @@ out gl_PerVertex {
 #define BINDING(x) layout(set = 0, binding = x)
 #endif
 
-// Binding 0: the mesh's own vertices, 8 floats each (position, normal, uv).
+// Binding 0: the mesh's own vertices, 24 bytes each: position, the normal as
+// four signed normalized bytes, then uv. The normal is normalized below, so the
+// step size of the narrow form does not survive into the lighting.
 layout(location = 0) in vec3 a_position;
 layout(location = 1) in vec2 a_uv;
-layout(location = 2) in vec3 a_normal;
+layout(location = 2) in vec4 a_normal;
 
-// Binding 1: one element per instance, 112 bytes: the world matrix, colour,
+// Binding 1: one element per instance, 76 bytes: the world matrix, color,
 // texture index and the sampled rectangle.
-layout(location = 3) in vec4 a_model0;
-layout(location = 4) in vec4 a_model1;
-layout(location = 5) in vec4 a_model2;
+//
+// The matrix arrives as its three linear columns plus the translation column.
+// An affine matrix -- which is all the model stack builds -- has (0, 0, 0, 1)
+// as its fourth row, so that row is put back here rather than uploaded as four
+// zeroes per instance.
+layout(location = 3) in vec3 a_model0;
+layout(location = 4) in vec3 a_model1;
+layout(location = 5) in vec3 a_model2;
 layout(location = 6) in vec4 a_model3;
+// Normalized bytes, so this reads as a 0..1 color.
 layout(location = 7) in vec4 a_color;
 layout(location = 8) in float a_textureIndex;
 
@@ -49,12 +57,16 @@ BINDING(0) uniform Transforms {
 };
 
 void main() {
-    mat4 model = mat4(a_model0, a_model1, a_model2, a_model3);
+    mat4 model = mat4(
+        vec4(a_model0, 0.0),
+        vec4(a_model1, 0.0),
+        vec4(a_model2, 0.0),
+        a_model3);
 
     vec4 worldPos = model * vec4(a_position, 1.0);
     v_worldPos = worldPos.xyz;
     v_uv = a_uvRect.xy + a_uv * a_uvRect.zw;
-    v_normal = normalize(mat3(model) * a_normal);
+    v_normal = normalize(mat3(model) * a_normal.xyz);
     v_color = a_color;
     v_textureIndex = a_textureIndex;
 

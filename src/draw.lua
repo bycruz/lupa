@@ -45,27 +45,44 @@ local MAX_TEXTURE_HEIGHT = 512
 --- Depth of the model matrix stack.
 local MODEL_STACK_MAX = 32
 
+--- One color channel as the normalized byte the instance record stores.
+--- Rounds rather than truncates so that 0.2 and 0.6 come back as themselves.
+---@param value number
+---@return number
+local function colorByte(value)
+	local byte = math.floor(value * 255 + 0.5)
+	if byte < 0 then
+		return 0
+	elseif byte > 255 then
+		return 255
+	end
+	return byte
+end
+
 ffi.cdef [[
     /* One instance of a mesh: the world matrix to apply to the mesh's own
-       vertices, plus the per-draw state that differs between instances. The
-       matrix is four vec4 columns, matching GLSL's mat4 constructor and the
-       column-major layout the model stack already uses.
+       vertices, plus the per-draw state that differs between instances. Columns
+       match GLSL's mat4 constructor and the column-major layout the model stack
+       already uses.
+
+       The matrix is thirteen floats rather than sixteen. Everything the model
+       stack builds is affine, so its fourth row is always (0, 0, 0, 1) and the
+       shader puts that row back instead of reading it: four floats per instance
+       that would have been zeros every time.
 
        uvRect is (u0, v0, spanU, spanV) for the sampled rectangle, which is what
        lets a draw made under setTextureRect join an instance batch instead of
        having the remap baked into its vertices.
 
-       112 bytes, with the matrix columns and the uv rect each on a 16 byte
-       boundary so the shader reads the array straight through. */
+       Color is four normalized bytes, a four byte drain on a record that is
+       otherwise per-instance position data. 76 bytes, uploaded once per draw. */
     typedef struct {
-        float model[16];
-        float r, g, b, a;
+        float model0x, model0y, model0z;
+        float model1x, model1y, model1z;
+        float model2x, model2y, model2z;
+        float model3x, model3y, model3z, model3w;
+        uint8_t r, g, b, a;
         float textureIndex;
-        /* The texture index takes a whole 16 byte slot, so the uv rect that
-           follows lands on the offset the vertex layout declares for it. Padding
-           after the uv rect instead would leave the two disagreeing, and the
-           shader would interpolate whatever the padding held. */
-        float _padIndex0, _padIndex1, _padIndex2;
         float uvU0, uvV0, uvSpanU, uvSpanV;
     } LupaInstance;
 
@@ -115,6 +132,60 @@ local DrawRecordStride = ffi.sizeof("LupaDrawRecord")
 --- Starting capacity of the per-frame instance array; it doubles like the
 --- geometry arrays when a frame needs more.
 local INITIAL_INSTANCE_CAPACITY = 1024
+
+--- Bytes one vertex takes in the arena, and the size meshes arrive in.
+---
+--- A mesh is built from eight floats per vertex -- position, normal, uv -- which
+--- is the shape the OBJ loader and Assets:mesh take. The arena stores the same
+--- data in 24 bytes, because the normal's three components fit in signed
+--- normalized bytes: a 1/127 step that the shader's normalize() hides, paid for
+--- out of the vertices every frame fetches rather than the ones it does not.
+local PACKED_VERTEX_BYTES = 24
+local SOURCE_VERTEX_FLOATS = 8
+
+--- A normal component as the signed normalized byte the arena stores. -1 is
+--- 0x80, which is why this returns the byte's unsigned value.
+---@param value number
+---@return number
+local function snormByte(value)
+	local scaled = math.floor(value * 127 + 0.5)
+	if scaled < -127 then
+		scaled = -127
+	elseif scaled > 127 then
+		scaled = 127
+	end
+	if scaled < 0 then
+		return scaled + 256
+	end
+	return scaled
+end
+
+--- Copy a mesh's vertices into the arena's packed layout.
+---@param mesh table
+---@param scratch ffi.cdata* at least vertexCount * PACKED_VERTEX_BYTES bytes
+local function packVertices(mesh, scratch)
+	local source = ffi.cast("float*", mesh.vertices)
+	local floats = ffi.cast("float*", scratch)
+	local bytes = ffi.cast("uint8_t*", scratch)
+
+	for i = 0, mesh.vertexCount - 1 do
+		local src = i * SOURCE_VERTEX_FLOATS
+		local dst = i * 6 -- 24 bytes read as six floats
+
+		floats[dst] = source[src]
+		floats[dst + 1] = source[src + 1]
+		floats[dst + 2] = source[src + 2]
+
+		local normal = i * PACKED_VERTEX_BYTES + 12
+		bytes[normal] = snormByte(source[src + 3])
+		bytes[normal + 1] = snormByte(source[src + 4])
+		bytes[normal + 2] = snormByte(source[src + 5])
+		bytes[normal + 3] = 0
+
+		floats[dst + 4] = source[src + 6]
+		floats[dst + 5] = source[src + 7]
+	end
+end
 
 --- Starting size of the mesh arenas, which hold every mesh's vertices and
 --- indices in one buffer each. Indirect draws share the bound vertex and index
@@ -299,22 +370,24 @@ function Draw.new(window, options)
 
 	-- Meshes supply position, normal and uv (8 floats each); everything that
 	-- varies per draw comes from the instance instead.
-	local meshLayout = hood.VertexLayout.new()
-		:withAttribute({ type = "f32", size = 3, offset = 0 })  -- location 0: position
-		:withAttribute({ type = "f32", size = 2, offset = 24 }) -- location 1: uv
-		:withAttribute({ type = "f32", size = 3, offset = 12 }) -- location 2: normal
+	local meshLayout = hood.VertexLayout.new({ stride = PACKED_VERTEX_BYTES })
+		:withAttribute({ type = "f32", size = 3, offset = 0, location = 0 })  -- position
+		:withAttribute({ type = "f32", size = 2, offset = 16, location = 1 }) -- uv
+		:withAttribute({ type = "i8", size = 4, offset = 12, normalized = true, location = 2 }) -- normal
 
-	-- One element per instance: the world matrix, the colour and the texture
-	-- index. The stride is stated rather than derived so it matches the 96 byte
-	-- record the CPU writes, including its padding.
+	-- One element per instance: the world matrix, the color and the texture
+	-- index. The stride is stated rather than derived so it matches the record
+	-- the CPU writes. Each attribute names its location, because a location is
+	-- otherwise taken from the attribute's position here, which would tie the
+	-- order of this list to the order in the shader.
 	local instanceLayout = hood.VertexLayout.new({ stride = InstanceStride })
-		:withAttribute({ type = "f32", size = 4, offset = 0 })   -- location 3: model column 0
-		:withAttribute({ type = "f32", size = 4, offset = 16 })  -- location 4
-		:withAttribute({ type = "f32", size = 4, offset = 32 })  -- location 5
-		:withAttribute({ type = "f32", size = 4, offset = 48 })  -- location 6
-		:withAttribute({ type = "f32", size = 4, offset = 64 })  -- location 7: colour
-		:withAttribute({ type = "f32", size = 1, offset = 80 })  -- location 8: texture index
-		:withAttribute({ type = "f32", size = 4, offset = 96 })  -- location 9: sampled rect
+		:withAttribute({ type = "f32", size = 3, offset = 0, location = 3 })  -- model column 0
+		:withAttribute({ type = "f32", size = 3, offset = 12, location = 4 })
+		:withAttribute({ type = "f32", size = 3, offset = 24, location = 5 })
+		:withAttribute({ type = "f32", size = 4, offset = 36, location = 6 })  -- translation column
+		:withAttribute({ type = "u8", size = 4, offset = 52, normalized = true, location = 7 }) -- color
+		:withAttribute({ type = "f32", size = 1, offset = 56, location = 8 })  -- texture index
+		:withAttribute({ type = "f32", size = 4, offset = 60, location = 9 })  -- sampled rect
 		:withInstanceRate()
 
 	-- One set of buffers per frame that can be in flight. Headless has no
@@ -474,13 +547,29 @@ function Draw.new(window, options)
 	---@param mesh table
 	---@return number vertexBase in vertices, for vertexOffset
 	---@return number indexBase in indices, for firstIndex
+	-- One reusable conversion buffer, sized to the largest mesh placed so far.
+	local vertexScratch, vertexScratchBytes = nil, 0
+	---@param vertexCount number
+	---@return ffi.cdata*
+	local function scratchFor(vertexCount)
+		local needed = vertexCount * PACKED_VERTEX_BYTES
+		if needed > vertexScratchBytes then
+			vertexScratchBytes = math.max(needed, PACKED_VERTEX_BYTES * 256)
+			vertexScratch = ffi.new("uint8_t[?]", vertexScratchBytes)
+		end
+		return vertexScratch
+	end
+
+	---@param mesh table
+	---@return number vertexBase
+	---@return number indexBase
 	local function placeMesh(mesh)
 		local placement = mesh.arena
 		if placement then
 			return placement.vertexBase, placement.indexBase
 		end
 
-		local vertexBytes = mesh.vertexCount * 8 * 4
+		local vertexBytes = mesh.vertexCount * PACKED_VERTEX_BYTES
 		local indexBytes = mesh.indexCount * 4
 
 		local needVertex = arena.vertexUsed + vertexBytes
@@ -508,7 +597,12 @@ function Draw.new(window, options)
 
 			for _, other in ipairs(arena.meshes) do
 				local at = other.arena
-				upload(device, arena.vertexBuffer, other.vertexCount * 8 * 4, other.vertices, at.vertexBytes)
+				-- Re-pack rather than keeping a second CPU copy of every mesh
+				-- around: growth happens when a mesh is first placed, which is
+				-- rare enough to redo the conversion for all of them.
+				local scratch = scratchFor(other.vertexCount)
+				packVertices(other, scratch)
+				upload(device, arena.vertexBuffer, other.vertexCount * PACKED_VERTEX_BYTES, scratch, at.vertexBytes)
 				upload(device, arena.indexBuffer, other.indexCount * 4, other.indices, at.indexBytes)
 			end
 
@@ -517,14 +611,16 @@ function Draw.new(window, options)
 		end
 
 		mesh.arena = {
-			vertexBase = arena.vertexUsed / 32,
+			vertexBase = arena.vertexUsed / PACKED_VERTEX_BYTES,
 			indexBase = arena.indexUsed / 4,
 			vertexBytes = arena.vertexUsed,
 			indexBytes = arena.indexUsed,
 		}
 		arena.meshes[#arena.meshes + 1] = mesh
 
-		upload(device, arena.vertexBuffer, vertexBytes, mesh.vertices, arena.vertexUsed)
+		local packed = scratchFor(mesh.vertexCount)
+		packVertices(mesh, packed)
+		upload(device, arena.vertexBuffer, vertexBytes, packed, arena.vertexUsed)
 		upload(device, arena.indexBuffer, indexBytes, mesh.indices, arena.indexUsed)
 
 		arena.vertexUsed = arena.vertexUsed + vertexBytes
@@ -646,7 +742,7 @@ end
 --- Draw a rectangle. (x, y) is the bottom-left corner: the default 2D view is
 --- orthographic with y increasing upward.
 ---
---- A rectangle is one instance of a unit quad, so it costs a 112 byte record
+--- A rectangle is one instance of a unit quad, so it costs a 76 byte record
 --- rather than four vertices, and consecutive rectangles share a single draw
 --- command.
 ---@param x number
@@ -656,14 +752,14 @@ end
 ---@format disable-next
 function Draw:rect(x, y, w, h)
 	local instance = appendInstance(self, RECT_MESH)
-	local m = instance.model
-
 	-- The quad is centred and unit sized, so the matrix is its size and centre.
-	-- Rectangles do not go through the model stack, exactly as before.
-	m[0], m[1], m[2], m[3] = w, 0, 0, 0
-	m[4], m[5], m[6], m[7] = 0, h, 0, 0
-	m[8], m[9], m[10], m[11] = 0, 0, 1, 0
-	m[12], m[13], m[14], m[15] = x + w * 0.5, y + h * 0.5, 0, 1
+	-- Rectangles do not go through the model stack, exactly as before, and the
+	-- fourth row is the (0, 0, 0, 1) the shader assumes.
+	instance.model0x, instance.model0y, instance.model0z = w, 0, 0
+	instance.model1x, instance.model1y, instance.model1z = 0, h, 0
+	instance.model2x, instance.model2y, instance.model2z = 0, 0, 1
+	instance.model3x, instance.model3y, instance.model3z, instance.model3w =
+		x + w * 0.5, y + h * 0.5, 0, 1
 end
 
 --- Make room for more indirect draw records.
@@ -861,7 +957,7 @@ end
 --- Consecutive draws of the same mesh under the same texture extend a single
 --- draw command, so a frame of rects — or a loop over entities sharing a mesh —
 --- becomes one record covering all of them. Anything that differs per draw
---- (transform, colour, sampled rectangle) travels in the instance record, so
+--- (transform, color, sampled rectangle) travels in the instance record, so
 --- only a different mesh or texture starts a new one.
 ---@param self lupa.Draw
 ---@param mesh table
@@ -870,7 +966,12 @@ function appendInstance(self, mesh)
 	self:reserveInstances(1)
 
 	local instance = self.instances[self.instanceCount]
-	instance.r, instance.g, instance.b, instance.a = self.curR, self.curG, self.curB, self.curA
+	-- Normalized bytes: the shader reads them back as 0..1 floats, and a 1/255
+	-- step is below anything a drawing can show.
+	instance.r = colorByte(self.curR)
+	instance.g = colorByte(self.curG)
+	instance.b = colorByte(self.curB)
+	instance.a = colorByte(self.curA)
 	instance.textureIndex = self.curTexture
 	instance.uvU0, instance.uvV0 = self.texU0, self.texV0
 	instance.uvSpanU, instance.uvSpanV = self.texU1 - self.texU0, self.texV1 - self.texV0
@@ -929,13 +1030,17 @@ local function emitMesh(self, mesh, px, py, pz, sx, sy, sz)
 	local instance = appendInstance(self, mesh)
 	local e = self.model.m
 
-	instance.model[0], instance.model[1], instance.model[2], instance.model[3] =
-		e[0] * sx, e[1] * sx, e[2] * sx, e[3] * sx
-	instance.model[4], instance.model[5], instance.model[6], instance.model[7] =
-		e[4] * sy, e[5] * sy, e[6] * sy, e[7] * sy
-	instance.model[8], instance.model[9], instance.model[10], instance.model[11] =
-		e[8] * sz, e[9] * sz, e[10] * sz, e[11] * sz
-	instance.model[12], instance.model[13], instance.model[14], instance.model[15] =
+	-- Only the three columns of the linear part and the translation column are
+	-- stored: scaling a column keeps its fourth component at zero, and adding a
+	-- position keeps the translation column's at one, so the row the record
+	-- leaves out is still (0, 0, 0, 1).
+	instance.model0x, instance.model0y, instance.model0z =
+		e[0] * sx, e[1] * sx, e[2] * sx
+	instance.model1x, instance.model1y, instance.model1z =
+		e[4] * sy, e[5] * sy, e[6] * sy
+	instance.model2x, instance.model2y, instance.model2z =
+		e[8] * sz, e[9] * sz, e[10] * sz
+	instance.model3x, instance.model3y, instance.model3z, instance.model3w =
 		e[12] + px, e[13] + py, e[14] + pz, e[15]
 end
 -- ===========================================================================
@@ -1121,7 +1226,7 @@ function Draw:sphere(x, y, z, radius, segments)
 end
 
 --- Draw a mesh built with Draw:createMesh or loaded with Assets:obj, at a
---- position, optionally scaled. The current model matrix and colour apply as
+--- position, optionally scaled. The current model matrix and color apply as
 --- they do for the built-in primitives.
 ---@param mesh lupa.Mesh
 ---@param x number?
@@ -1167,7 +1272,7 @@ function Draw:setLight(t)
 	light.lightEnabled = 1.0
 end
 
---- Back to unlit: vertex colours are used directly.
+--- Back to unlit: vertex colors are used directly.
 function Draw:clearLight()
 	self.lighting.lightEnabled = 0.0
 end
@@ -1233,7 +1338,7 @@ function Draw:setTexture(texture)
 	self.texDefault = true
 end
 
---- Stop sampling a texture: shapes go back to flat vertex colour.
+--- Stop sampling a texture: shapes go back to flat vertex color.
 function Draw:clearTexture()
 	self.curTexture = -1
 	self.texU0, self.texV0, self.texU1, self.texV1 = 0, 0, 1, 1

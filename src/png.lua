@@ -1,4 +1,4 @@
---- Minimal PNG decoder: 8- and 16-bit, non-interlaced, colour types 0/2/3/4/6.
+--- Minimal PNG decoder: 8- and 16-bit, non-interlaced, color types 0/2/3/4/6.
 ---
 --- Deliberately dependency-free: it parses the chunks itself and uses the
 --- system zlib's one-shot `uncompress` for the IDAT stream, so there is no
@@ -130,7 +130,7 @@ function M.decode(data)
 	elseif colorType == 4 then channels = 2
 	elseif colorType == 6 then channels = 4
 	else
-		error("unsupported PNG colour type " .. tostring(colorType))
+		error("unsupported PNG color type " .. tostring(colorType))
 	end
 
 	local bpp = channels * (bitDepth / 8)

@@ -23,7 +23,7 @@ local W, H = screen.width, screen.height
 ---@param label string
 ---@param got number[]
 ---@param want number[]
-local function checkColour(label, got, want)
+local function checkColor(label, got, want)
 	for i = 1, 3 do
 		if math.abs(got[i] - want[i]) > 8 then
 			error(string.format("%s: got (%d, %d, %d), want (%d, %d, %d)",
@@ -41,10 +41,10 @@ end
 ---@param b number 0..1
 local function expectAt(pixels, label, x, y, r, g, b)
 	local pr, pg, pb = pixels(x, y)
-	checkColour(label, { pr, pg, pb }, { r * 255, g * 255, b * 255 })
+	checkColor(label, { pr, pg, pb }, { r * 255, g * 255, b * 255 })
 end
 
---- A 2x2 texture with four distinct colours: red and green across the top,
+--- A 2x2 texture with four distinct colors: red and green across the top,
 --- blue and yellow across the bottom.
 local function uploadTexels(draw)
 	local texels = ffi.new("uint8_t[16]", {
@@ -138,7 +138,7 @@ screenIt("render: a texture is sampled across the rect", function()
 		d:setColor(0, 0, 0, 1)
 		d:rect(0, 0, W, H)
 
-		-- A texture is multiplied by the current colour, so showing the image
+		-- A texture is multiplied by the current color, so showing the image
 		-- itself takes white rather than the background's black.
 		d:setColor(1, 1, 1, 1)
 		d:setTexture(uploadTexels(d))
@@ -186,7 +186,7 @@ screenIt("render: a mesh is drawn at the position it was given", function()
 		d:rect(0, 0, W, H)
 
 		-- Texture state is sticky, and earlier tests selected one, so this asks
-		-- for flat colour explicitly to test the mesh rather than the atlas.
+		-- for flat color explicitly to test the mesh rather than the atlas.
 		d:clearTexture()
 		d:setColor(0, 1, 1, 1)
 		d:mesh(triangle, 200, 200, 0)
@@ -197,6 +197,31 @@ screenIt("render: a mesh is drawn at the position it was given", function()
 	expectAt(pixels, "inside the triangle", 200, 195, 0, 1, 1)
 	expectAt(pixels, "above it", 200, 215, 0, 0, 0)
 	expectAt(pixels, "left of it", 180, 195, 0, 0, 0)
+end)
+
+screenIt("render: lighting reads the mesh normals", function()
+	-- Rects face +Z. `direction` is the way the light travels, so a light
+	-- heading away from the camera shines along -Z and hits them head on, while
+	-- one heading towards the camera leaves only the ambient term. The normals
+	-- reach the shader as packed signed normalized bytes, which is what this
+	-- pins down: a mis-decoded normal would shade the rect by some other angle.
+	local facing = screen:render(function(d)
+		d:setColor(1, 1, 1, 1)
+		d:clearTexture()
+		d:setLight({ direction = { 0, 0, -1 }, color = { 1, 1, 1 }, ambient = { 0, 0, 0 } })
+		d:rect(0, 0, W, H)
+	end)
+
+	-- Travelling towards the camera: the normal faces away, so diffuse is zero.
+	local away = screen:render(function(d)
+		d:setColor(1, 1, 1, 1)
+		d:clearTexture()
+		d:setLight({ direction = { 0, 0, 1 }, color = { 1, 1, 1 }, ambient = { 0.25, 0, 0 } })
+		d:rect(0, 0, W, H)
+	end)
+
+	expectAt(facing, "lit head on", 100, 100, 1, 1, 1)
+	expectAt(away, "lit from behind", 100, 100, 0.25, 0, 0)
 end)
 
 screenIt("render: capturePixels reports when there is nothing captured", function()
