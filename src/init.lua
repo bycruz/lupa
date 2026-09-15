@@ -19,11 +19,19 @@ local Input = require("lupa.input")
 ---@class lupa
 local lupa = {}
 
+---@class lupa.RunOptions
+--- Options for lupa.run.
+---@field headless boolean? draw without a window, onto an image that can be read back
+---@field width number? size of the headless target, defaults to 800
+---@field height number? size of the headless target, defaults to 600
+---@field frames number? stop after this many frames; without it a headless run ends when App:quit() is called
+
 ---@generic T
 ---@param app lupa.App<T>
-function lupa.run(app)
-	local eventLoop = winit.EventLoop.new()
-	local window = winit.Window.fromEventLoop(eventLoop)
+---@param options lupa.RunOptions?
+function lupa.run(app, options)
+	options = options or {}
+	local headless = options.headless or false
 
 	assert(app.start, "Missing App:start()")
 	assert(app.update, "Missing App:update(dt)")
@@ -33,6 +41,48 @@ function lupa.run(app)
 	function app:quit()
 		isRunning = false
 	end
+
+	if headless then
+		-- No window, no event loop: frames are driven directly, and the app's own
+		-- quit ends the run. Drawing goes to the capture target, so what a frame
+		-- drew can be read back with Draw:capturePixels.
+		local draw = Draw.new(nil, {
+			headless = true,
+			width = options.width,
+			height = options.height,
+		})
+
+		local input = Input.new(nil)
+		local assets = Assets.new(draw)
+
+		app:start(assets)
+
+		local previous = os.clock()
+		local frame = 0
+
+		while isRunning do
+			local now = os.clock()
+			local dt = now - previous
+			previous = now
+
+			app:update(dt, input)
+			input:clearFrame()
+
+			draw:beginFrame()
+			app:draw(draw)
+			draw:endFrame()
+
+			frame = frame + 1
+			if options.frames and frame >= options.frames then
+				isRunning = false
+			end
+		end
+
+		return
+	end
+
+	local eventLoop = winit.EventLoop.new()
+	local window = winit.Window.fromEventLoop(eventLoop)
 
 	-- draw first: Assets uploads images into draw's texture array.
 	local draw = Draw.new(window)

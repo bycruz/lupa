@@ -40,8 +40,14 @@ BINDING(2) uniform texture2DArray u_textures;
 BINDING(3) uniform sampler u_sampler;
 #endif
 
+// One entry per texture layer, holding the scale that turns queued UVs running
+// 0..1 into the part of the layer the image was uploaded to. std140 strides an
+// array of scalars or vectors by 16 bytes whatever the element type, so these
+// are declared as vec4 and only .xy is used: that way the spacing the shader
+// reads is the spacing the CPU writes, rather than one that depends on that rule
+// being remembered.
 BINDING(4) uniform TextureScales {
-    vec2 u_uvScales[256];
+    vec4 u_uvScales[256];
 };
 
 void main() {
@@ -49,7 +55,7 @@ void main() {
     if (v_textureIndex < 0.0) {
         texColor = v_color;
     } else {
-        vec2 uvScale = u_uvScales[int(v_textureIndex)];
+        vec2 uvScale = u_uvScales[int(v_textureIndex)].xy;
 #ifndef VULKAN
         texColor = SAMPLE_TEXTURE(u_textures, vec3(v_uv * uvScale, v_textureIndex)) * v_color;
 #else

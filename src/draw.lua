@@ -61,6 +61,11 @@ ffi.cdef [[
         float model[16];
         float r, g, b, a;
         float textureIndex;
+        /* The texture index takes a whole 16 byte slot, so the uv rect that
+           follows lands on the offset the vertex layout declares for it. Padding
+           after the uv rect instead would leave the two disagreeing, and the
+           shader would interpolate whatever the padding held. */
+        float _padIndex0, _padIndex1, _padIndex2;
         float uvU0, uvV0, uvSpanU, uvSpanV;
     } LupaInstance;
 
@@ -120,6 +125,11 @@ local INITIAL_ARENA_INDEX_BYTES = 1024 * 1024
 --- Starting capacity of the per-frame draw record array.
 local INITIAL_DRAW_CAPACITY = 256
 
+--- The uv scale revision every frame slot starts at, matching the all-ones table
+--- Draw.new uploads. Adding a texture bumps it, which is what tells each slot
+--- its copy is stale.
+local UV_SCALES_REVISION_INITIAL = 1
+
 --- Reallocate a flat array so it holds at least `needed` elements, preserving
 --- what is already in it. Doubling keeps a frame that grows repeatedly
 --- amortised; the caller passes the element count, never a byte count.
@@ -154,8 +164,15 @@ local LightingSize = ffi.sizeof("LupaLighting")
 local backend = os.getenv("BACKEND") or "vulkan"
 local shaderType = backend == "vulkan" and "spirv" or "glsl"
 
---- Bytes of UV scale data: 256 texture slots of 2 floats.
-local UV_SCALES_SIZE = 512 * 4
+--- Bytes of UV scale data: 256 texture slots of one vec4 each.
+---
+--- The shader declares `vec4 u_uvScales[256]` and uses only .xy. A std140
+--- uniform array strides by 16 bytes whatever its element type, so a vec2 array
+--- would be laid out at 16 byte intervals anyway; saying vec4 here means the CPU
+--- side and the shader agree on where each slot starts instead of relying on
+--- that rule being remembered.
+local UV_SCALES_SLOT_FLOATS = 4
+local UV_SCALES_SIZE = 256 * UV_SCALES_SLOT_FLOATS * 4
 
 --- Write CPU data into a buffer, using whichever route the backend has.
 ---
@@ -230,6 +247,10 @@ local function createFrameSlot(device, instanceCapacity, drawCapacity)
 		}),
 		instanceCapacity = instanceCapacity,
 		drawCapacity = drawCapacity,
+		-- Which revision of the uv scales this slot holds. Textures can be added
+		-- on any frame, so a slot that missed one has to upload them again; a
+		-- plain dirty flag would only ever refresh the slot that saw the change.
+		uvScalesRevision = UV_SCALES_REVISION_INITIAL,
 	}
 end
 
@@ -239,15 +260,42 @@ end
 local appendInstance
 local RECT_MESH
 
----@param window winit.Window
-function Draw.new(window)
-	local instance = hood.Instance.new({ backend = backend, flags = {} })
+--- A frame target: either a window's swapchain, or an offscreen image that can
+--- be read back.
+---
+--- Headless mode exists so a program — a test, a batch render, a benchmark — can
+--- draw without a window. There is no surface and no presentation, so the frame
+--- is rendered into the capture target and read back with Draw:capturePixels.
+--- Nothing else changes: the same pipeline, the same arenas, the same one call.
+---@param window winit.Window? nil when headless
+---@param options { headless: boolean?, width: number?, height: number? }?
+function Draw.new(window, options)
+	options = options or {}
+	local headless = options.headless or false
+
+	local instance = hood.Instance.new({
+		backend = backend,
+		flags = headless and { "headless" } or {},
+	})
 	local adapter = instance:requestAdapter({ powerPreference = "high-performance" })
 	local device = adapter:requestDevice()
 
-	local surface = instance:createSurface(window)
+	local surface, swapchain
 	local surfaceConfig = { presentMode = "immediate" }
-	local swapchain = surface:configure(device, surfaceConfig)
+	local format = "rgba8unorm"
+	local width, height
+	local frameCount = 1
+
+	if headless then
+		width = options.width or 800
+		height = options.height or 600
+	else
+		surface = instance:createSurface(window)
+		swapchain = surface:configure(device, surfaceConfig)
+		format = swapchain.format
+		width, height = swapchain.width, swapchain.height
+		frameCount = swapchain.imageCount or 1
+	end
 
 	-- Meshes supply position, normal and uv (8 floats each); everything that
 	-- varies per draw comes from the instance instead.
@@ -269,8 +317,8 @@ function Draw.new(window)
 		:withAttribute({ type = "f32", size = 4, offset = 96 })  -- location 9: sampled rect
 		:withInstanceRate()
 
-	-- One set of buffers per frame the swapchain can have in flight.
-	local frameCount = swapchain.imageCount or 1
+	-- One set of buffers per frame that can be in flight. Headless has no
+	-- swapchain and draws one frame at a time, so one set is enough.
 	local frames = {}
 	for i = 1, frameCount do
 		frames[i] = createFrameSlot(device, INITIAL_INSTANCE_CAPACITY, INITIAL_DRAW_CAPACITY)
@@ -286,6 +334,10 @@ function Draw.new(window)
 		minFilter = "linear",
 		magFilter = "linear",
 		mipmapFilter = "linear",
+		-- Images here have a single mip level, so the sampler must not ask for
+		-- any other: hood's default maximum LOD is 1000, which leaves the sampler
+		-- free to read mip levels that do not exist.
+		lodMaxClamp = 0,
 		addressModeU = "repeat",
 		addressModeV = "repeat",
 		addressModeW = "repeat"
@@ -303,11 +355,12 @@ function Draw.new(window)
 
 	local textureView = texture:createView({})
 
-	-- The fragment shader multiplies each quad's UV by u_uvScales[textureIndex].
-	-- Uninitialised that is (0, 0), which collapses every sample to one texel,
-	-- so seed all 256 slots with 1.
-	local uvScales = ffi.new("float[512]")
-	for i = 0, 511 do
+	-- The fragment shader multiplies each quad's UV by u_uvScales[textureIndex],
+	-- which is how a small image sitting in the corner of a whole layer still
+	-- covers a quad whose UVs run 0..1. Until a texture is added the scale is 1,
+	-- so an untextured draw is unaffected.
+	local uvScales = ffi.new("float[?]", 256 * UV_SCALES_SLOT_FLOATS)
+	for i = 0, 256 * UV_SCALES_SLOT_FLOATS - 1 do
 		uvScales[i] = 1.0
 	end
 	for i = 1, frameCount do
@@ -367,7 +420,7 @@ function Draw.new(window)
 				{
 					blend = "alpha-blending",
 					writeMask = hood.ColorWrites.All,
-					format = swapchain.format
+					format = format
 				}
 			}
 		},
@@ -400,11 +453,11 @@ function Draw.new(window)
 		usages = { "INDEX", "COPY_DST" },
 	})
 
-	-- Match the swapchain extent rather than the window size: hood derives the
-	-- render area from the swapchain texture, and a framebuffer whose depth
-	-- attachment is smaller than that render area is invalid.
+	-- The depth target matches the render area. For a window that is the swapchain
+	-- extent rather than the window size, because hood derives the render area
+	-- from the swapchain texture and a smaller depth attachment is invalid.
 	local depthBuffer = device:createTexture({
-		extents = { dim = "2d", width = swapchain.width, height = swapchain.height },
+		extents = { dim = "2d", width = width, height = height },
 		format = "depth24plus",
 		usages = { "RENDER_ATTACHMENT" }
 	})
@@ -491,6 +544,9 @@ function Draw.new(window)
 	---@format disable-next
 	return setmetatable({
 		swapchain = swapchain,
+		headless = headless,
+		targetWidth = width,
+		targetHeight = height,
 		pipeline = pipeline,
 		placeMesh = placeMesh,
 		arena = arena,
@@ -521,6 +577,12 @@ function Draw.new(window)
 		rotationScratch = lpmath.mat4.identity(),
 		customView = false,
 		camera = nil,
+		capturing = false,
+		capturePending = false,
+		captureTexture = false,
+		captureBuffer = false,
+		captureWidth = 0,
+		captureHeight = 0,
 		curR = 1, curG = 1, curB = 1, curA = 1,
 		curTexture = -1,
 		texU0 = 0, texV0 = 0, texU1 = 1, texV1 = 1,
@@ -529,7 +591,7 @@ function Draw.new(window)
 		maxTextureWidth = MAX_TEXTURE_WIDTH,
 		maxTextureHeight = MAX_TEXTURE_HEIGHT,
 		uvScales = uvScales,
-		uvScalesDirty = false,
+		uvScalesRevision = UV_SCALES_REVISION_INITIAL,
 		transforms = Transforms(),
 		lighting = Lighting(),
 		emptyViewDesc = {},
@@ -1119,7 +1181,8 @@ end
 ---
 --- The array is fixed at MAX_TEXTURES layers of MAX_TEXTURE_WIDTH x
 --- MAX_TEXTURE_HEIGHT; larger images have to be scaled down before they get
---- here (Assets:image does that for you).
+--- here (Assets:image does that for you). Drawing with the returned layer maps
+--- the whole image onto whatever UVs the shape has, whatever its size.
 ---@param width number
 ---@param height number
 ---@param pixels ffi.cdata*
@@ -1142,6 +1205,15 @@ function Draw:addTexture(width, height, pixels)
 		layer = layer,
 		bytesPerRow = width * 4,
 	}, pixels)
+
+	-- The image occupies the corner of a layer that is MAX_TEXTURE_WIDTH by
+	-- MAX_TEXTURE_HEIGHT, so the shader scales UVs into that fraction of it.
+	-- Without this a sample at UV 1 lands 512 texels away, well outside the
+	-- image, where the layer holds whatever it was never written with.
+	local slot = layer * UV_SCALES_SLOT_FLOATS
+	self.uvScales[slot] = width / MAX_TEXTURE_WIDTH
+	self.uvScales[slot + 1] = height / MAX_TEXTURE_HEIGHT
+	self.uvScalesRevision = self.uvScalesRevision + 1
 
 	return layer
 end
@@ -1192,6 +1264,73 @@ end
 function Draw:line()
 end
 
+--- Render this frame to a readable image as well as to the window.
+---
+--- The frame is drawn a second time into an offscreen target and copied back to
+--- the CPU, which `capturePixels` then hands over. Tests use it to check what was
+--- actually drawn; nothing else changes, so the window still shows the frame.
+---
+--- The cost is a second pass over the frame's geometry, so it is a debugging and
+--- testing tool rather than something to leave on.
+function Draw:captureFrame()
+	self.capturing = true
+end
+
+--- The pixels of the last captured frame: width, height and RGBA8 rows from the
+--- top left. Returns nothing when no capture is waiting.
+---
+--- Reading them waits for the GPU, so it is the caller's frame timing that pays
+--- for the copy, not the frame that was captured.
+---@return number? width
+---@return number? height
+---@return string? pixels width * height * 4 bytes
+function Draw:capturePixels()
+	if not self.capturePending then
+		return nil
+	end
+
+	-- The copy has to have finished before the buffer can be read.
+	self.device.queue:waitIdle()
+
+	local buffer = self.captureBuffer
+	buffer:mapAsync()
+	local raw = ffi.cast("uint8_t*", buffer:getMappedRange())
+	local pixels = ffi.string(raw, self.captureWidth * self.captureHeight * 4)
+	buffer:unmap()
+
+	self.capturePending = false
+
+	return self.captureWidth, self.captureHeight, pixels
+end
+
+--- Create or resize the capture target to match the window.
+---@param width number
+---@param height number
+---@private
+function Draw:_ensureCaptureTarget(width, height)
+	if self.captureTexture and self.captureWidth == width and self.captureHeight == height then
+		return
+	end
+
+	if self.captureTexture then
+		self.captureView:destroy()
+		self.captureTexture:destroy()
+		self.captureBuffer:destroy()
+	end
+
+	self.captureWidth, self.captureHeight = width, height
+	self.captureTexture = self.device:createTexture({
+		extents = { dim = "2d", width = width, height = height },
+		format = "rgba8unorm",
+		usages = { "RENDER_ATTACHMENT", "COPY_SRC" },
+	})
+	self.captureView = self.captureTexture:createView({})
+	self.captureBuffer = self.device:createBuffer({
+		size = width * height * 4,
+		usages = { "MAP_READ" },
+	})
+end
+
 ---@private
 function Draw:beginFrame()
 	self.instanceCount = 0
@@ -1207,6 +1346,10 @@ end
 --- depth target afterwards.
 ---@private
 function Draw:resize()
+	if self.headless then
+		return
+	end
+
 	local device = self.device
 	local swapchain = self.surface:configure(device, self.surfaceConfig, self.swapchain)
 
@@ -1304,10 +1447,10 @@ end
 
 ---@private
 function Draw:endFrame()
-	-- The default 2D orthographic projection only depends on the window size, so
+	-- The default 2D orthographic projection only depends on the target size, so
 	-- it is rebuilt only when that changes. A camera or an explicit matrix owns
 	-- viewProj instead, and lighting is the caller's choice.
-	local width, height = self.window.width, self.window.height
+	local width, height = self:targetSize()
 	local transforms = self.transforms
 	if not self.customView then
 		if self.projWidth ~= width or self.projHeight ~= height then
@@ -1317,18 +1460,21 @@ function Draw:endFrame()
 	end
 	local lighting = self.lighting
 
-	local texture = self.swapchain:getCurrentTexture()
-	if not texture then
-		-- The swapchain no longer matches the surface (a resize happened).
-		-- Rebuild it and skip this frame; the next one renders normally.
-		self:resize()
-		return
+	local texture
+	if not self.headless then
+		texture = self.swapchain:getCurrentTexture()
+		if not texture then
+			-- The swapchain no longer matches the surface (a resize happened).
+			-- Rebuild it and skip this frame; the next one renders normally.
+			self:resize()
+			return
+		end
 	end
 
 	-- Ask the swapchain for the encoder, so hood reuses the command buffer it
 	-- pre-allocated for this frame slot. Going through the device instead
 	-- allocates a fresh command pool and command buffer every frame and never
-	-- frees them.
+	-- frees them. Headless has no swapchain, so the device hands one out.
 	--
 	-- Growth comes first because it can submit its own work and wait for the
 	-- queue to drain, which is best done before this frame's command buffer
@@ -1339,9 +1485,14 @@ function Draw:endFrame()
 	-- whose fence getCurrentTexture just waited on. That wait is what makes it
 	-- safe to write this slot's buffers from the CPU: the previous frame that
 	-- used them has finished.
-	local slot = self.frames[self.swapchain.currentFrame or 1] or self.frames[1]
+	local slot = self.frames[1]
+	if not self.headless then
+		slot = self.frames[self.swapchain.currentFrame or 1] or self.frames[1]
+	end
 
-	local encoder = self.swapchain:createCommandEncoder()
+	local encoder = self.headless
+		and self.device:createCommandEncoder()
+		or self.swapchain:createCommandEncoder()
 
 	-- The frame's data is nothing but instances and the draw commands that index
 	-- into them; every mesh's geometry was written to the arenas once.
@@ -1352,38 +1503,96 @@ function Draw:endFrame()
 		encoder:writeBuffer(slot.indirectBuffer, DrawRecordStride * self.drawRecordCount, self.drawRecords)
 	end
 
-	if self.uvScalesDirty then
+	-- A texture added on some earlier frame changed the scales for every slot,
+	-- not just the one that saw it, so each slot compares revisions rather than
+	-- sharing a flag that would be cleared by whichever frame got there first.
+	if slot.uvScalesRevision ~= self.uvScalesRevision then
 		encoder:writeBuffer(slot.uvScalesBuffer, UV_SCALES_SIZE, self.uvScales)
-		self.uvScalesDirty = false
+		slot.uvScalesRevision = self.uvScalesRevision
 	end
 
-	local renderDesc = self.renderDesc
-	renderDesc.colorAttachments[1].texture = texture:createView(self.emptyViewDesc)
-	encoder:beginRendering(renderDesc)
-	encoder:setViewport(0, 0, width, height)
+	-- Recording the frame's geometry is the same work whatever it is rendered
+	-- into, so it is a function of the target: the swapchain always, and the
+	-- capture target too when one was asked for.
+	---@param target hood.TextureView
+	local function recordFrame(target)
+		local renderDesc = self.renderDesc
+		renderDesc.colorAttachments[1].texture = target
+		encoder:beginRendering(renderDesc)
+		encoder:setViewport(0, 0, width, height)
 
-	-- The pipeline is set even for an empty frame: hood begins the render pass
-	-- when the pipeline is bound, so skipping it would leave endRendering ending a
-	-- pass that never started.
-	encoder:setPipeline(self.pipeline)
-	encoder:setBindGroup(0, slot.bindGroup)
+		-- The pipeline is set even for an empty frame: hood begins the render
+		-- pass when the pipeline is bound, so skipping it would leave
+		-- endRendering ending a pass that never started.
+		encoder:setPipeline(self.pipeline)
+		encoder:setBindGroup(0, slot.bindGroup)
 
-	if self.drawRecordCount > 0 then
-		-- The whole frame, one call: every mesh and quad is an instance in the
-		-- shared arenas, so the commands differ only in what they read. They are
-		-- issued in the order the draws were, which is what keeps the frame in
-		-- submission order without any grouping decisions.
-		encoder:setVertexBuffer(0, self.arena.vertexBuffer)
-		encoder:setVertexBuffer(1, slot.instanceBuffer)
-		encoder:setIndexBuffer(self.arena.indexBuffer, "u32")
-		encoder:drawIndexedIndirect(slot.indirectBuffer, 0, self.drawRecordCount, DrawRecordStride)
+		if self.drawRecordCount > 0 then
+			-- The whole frame, one call: every mesh and quad is an instance in
+			-- the shared arenas, so the commands differ only in what they read.
+			-- They are issued in the order the draws were, which is what keeps the
+			-- frame in submission order without any grouping decisions.
+			encoder:setVertexBuffer(0, self.arena.vertexBuffer)
+			encoder:setVertexBuffer(1, slot.instanceBuffer)
+			encoder:setIndexBuffer(self.arena.indexBuffer, "u32")
+			encoder:drawIndexedIndirect(slot.indirectBuffer, 0, self.drawRecordCount, DrawRecordStride)
+		end
+
+		encoder:endRendering()
 	end
 
-	encoder:endRendering()
+	-- Headless renders everything into the capture target, so every frame is
+	-- readable; a window renders to the swapchain, and to the capture target too
+	-- when one was asked for.
+	local capturing = self.headless or self.capturing
+
+	if not self.headless then
+		recordFrame(texture:createView(self.emptyViewDesc))
+	end
+
+	if capturing then
+		-- The capture target matches whatever the frame is rendered into: the
+		-- swapchain extent for a window, the configured size when headless.
+		local capWidth, capHeight = self.targetWidth, self.targetHeight
+		if not self.headless then
+			capWidth, capHeight = self.swapchain.width, self.swapchain.height
+		end
+		self:_ensureCaptureTarget(capWidth, capHeight)
+		recordFrame(self.captureView)
+
+		encoder:copyTextureToBuffer(
+			{ texture = self.captureTexture },
+			{ buffer = self.captureBuffer, bytesPerRow = capWidth * 4 },
+			{ width = capWidth, height = capHeight })
+
+		self.capturing = false
+		self.capturePending = true
+	end
 
 	local commandBuffer = encoder:finish()
-	self.device.queue:submit(commandBuffer, self.swapchain)
-	self.device.queue:present(self.swapchain)
+
+	if self.headless then
+		-- Nothing to present, and a command buffer that owns no swapchain
+		-- semaphores is submitted on its own.
+		self.device.queue:submit(commandBuffer)
+	else
+		self.device.queue:submit(commandBuffer, self.swapchain)
+		self.device.queue:present(self.swapchain)
+	end
+end
+
+--- The size of whatever the frame is rendered into.
+---@return number width
+---@return number height
+---@private
+function Draw:targetSize()
+	if self.headless then
+		-- Headless never resizes, so the size it was created with is the size of
+		-- every frame, whether or not the capture target exists yet.
+		return self.targetWidth, self.targetHeight
+	end
+
+	return self.window.width, self.window.height
 end
 
 return Draw
