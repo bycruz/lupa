@@ -155,12 +155,12 @@ function Draw.new(window)
 		:withAttribute({ type = "f32", size = 1, offset = 48 }) -- texture index
 
 	local vertexBuffer = device:createBuffer({
-		size = 1024 * 1024, -- 1MB for now, should be enough for simple shapes
+		size = VertexArraySize * MAX_VERTICES,
 		usages = { "VERTEX", "COPY_DST" }
 	})
 
 	local indexBuffer = device:createBuffer({
-		size = 1024 * 1024, -- 1MB for now, should be enough for simple shapes
+		size = IndexArraySize * MAX_INDICES,
 		usages = { "INDEX", "COPY_DST" }
 	})
 
