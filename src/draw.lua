@@ -43,15 +43,18 @@ local MAX_TEXTURES = 256
 local MAX_TEXTURE_WIDTH = 512
 local MAX_TEXTURE_HEIGHT = 512
 
-local MAX_VERTICES = 65536
+--- Starting capacity of the per-frame geometry arrays. These are a starting
+--- point, not a ceiling: Draw:reserve doubles them whenever a frame needs more
+--- room, so the only real limit on a frame's geometry is available memory.
+local INITIAL_VERTEX_CAPACITY = 65536
 
---- Upper bound on the CPU-side index array. Quad geometry needs 6 per quad;
---- meshes add their own on top.
-local MAX_INDICES = 262144
+--- Quad geometry needs 6 indices per 4 vertices, meshes add their own on top.
+local INITIAL_INDEX_CAPACITY = 262144
 
---- Quads the vertex buffer can hold. The index buffer is seeded with the quad
---- pattern for this many quads, so quad-only frames never rewrite it.
-local MAX_QUADS = MAX_VERTICES / 4
+--- Quad-only frames draw from the positional index pattern instead of uploading
+--- indices, and that pattern has to cover the whole vertex capacity, so the
+--- index side keeps at least this much room per vertex.
+local INDICES_PER_VERTEX = 6 / 4
 
 --- Depth of the model matrix stack.
 local MODEL_STACK_MAX = 32
@@ -93,25 +96,28 @@ ffi.cdef [[
 local VertexArray = ffi.typeof("LupaVertex[?]")
 local VertexArraySize = ffi.sizeof("LupaVertex")
 
+--- Index values are absolute within the frame's single batch, so a 16-bit index
+--- would cap any frame at 65536 vertices no matter how much memory it has.
+--- 32-bit indices remove that ceiling; the cost is 4 bytes per index instead
+--- of 2, against 52 bytes per vertex.
 ---@type fun(count: number): ffi.cdata*
-local IndexArray = ffi.typeof("uint16_t[?]")
-local IndexArraySize = ffi.sizeof("uint16_t")
+local IndexArray = ffi.typeof("uint32_t[?]")
+local IndexArraySize = ffi.sizeof("uint32_t")
 
 --- The index buffer for quad q is always vertices 4q, 4q+1, 4q+2, 4q+1, 4q+3,
 --- 4q+2 -- two triangles in the same winding, with no dependency on anything but
 --- the quad's position in the batch. That makes the whole buffer positional, so
---- it is generated once for MAX_QUADS quads and never rewritten: drawing the
---- first `indexCount` entries is correct for any number of quads.
+--- it is generated once per capacity and never rewritten: drawing the first
+--- `indexCount` entries is correct for any number of quads.
 ---
---- This is why Draw:rect no longer writes indices and Draw:endFrame no longer
---- uploads them. It holds as long as rects are the only thing that emits
---- geometry, which is true of the public API (pushVertex/pushIndex are
---- private, and a future triangle path would need its own index strategy).
+--- Draw:rect writes the same pattern into the CPU array, which is what lets a
+--- quad-only frame put it back if a mesh frame overwrote the GPU copy.
+---@param quads number
 ---@return ffi.cdata*
-local function buildIndices()
-	local indices = IndexArray(MAX_QUADS * 6)
+local function buildIndices(quads)
+	local indices = IndexArray(quads * 6)
 
-	for q = 0, MAX_QUADS - 1 do
+	for q = 0, quads - 1 do
 		local vc = q * 4
 		local ic = q * 6
 		indices[ic]     = vc
@@ -123,6 +129,28 @@ local function buildIndices()
 	end
 
 	return indices
+end
+
+--- Reallocate a flat array so it holds at least `needed` elements, preserving
+--- what is already in it. Doubling keeps a frame that grows repeatedly
+--- amortised; the caller passes the element count, never a byte count.
+---@param array ffi.cdata*
+---@param capacity number current element count
+---@param needed number required element count
+---@param elementSize number bytes per element
+---@param elementType fun(count: number): ffi.cdata*
+---@return ffi.cdata* array
+---@return number capacity
+local function growArray(array, capacity, needed, elementSize, elementType)
+	local grown = math.max(capacity, 1)
+	while grown < needed do
+		grown = grown * 2
+	end
+
+	local replacement = elementType(grown)
+	ffi.copy(replacement, array, capacity * elementSize)
+
+	return replacement, grown
 end
 
 
@@ -154,13 +182,19 @@ function Draw.new(window)
 		:withAttribute({ type = "f32", size = 4, offset = 32 }) -- color
 		:withAttribute({ type = "f32", size = 1, offset = 48 }) -- texture index
 
+	-- Sized from the actual budget rather than a guessed round number. The
+	-- per-frame upload is VertexArraySize * vertexCount bytes, and vertexCount
+	-- is only capped at the current capacity, so a smaller buffer means the tail
+	-- of a full batch is written past the end of the allocation. Derived here so
+	-- the two can never drift apart again. endFrame replaces these with bigger
+	-- ones when a frame outgrows them.
 	local vertexBuffer = device:createBuffer({
-		size = VertexArraySize * MAX_VERTICES,
+		size = VertexArraySize * INITIAL_VERTEX_CAPACITY,
 		usages = { "VERTEX", "COPY_DST" }
 	})
 
 	local indexBuffer = device:createBuffer({
-		size = IndexArraySize * MAX_INDICES,
+		size = IndexArraySize * INITIAL_INDEX_CAPACITY,
 		usages = { "INDEX", "COPY_DST" }
 	})
 
@@ -292,9 +326,13 @@ function Draw.new(window)
 		modelIdentStack[i] = true
 	end
 
-	-- The index buffer is positional and never changes, so it is written once
-	-- here instead of being re-uploaded every frame.
-	device.queue:writeBuffer(indexBuffer, IndexArraySize * MAX_QUADS * 6, buildIndices())
+	-- The index buffer is positional and never changes while the capacity does
+	-- not, so it is written once here instead of being re-uploaded every frame.
+	-- The pattern covers the whole vertex capacity, which is what lets a
+	-- quad-only frame skip the index upload entirely.
+	device.queue:writeBuffer(indexBuffer,
+		IndexArraySize * math.floor(INITIAL_VERTEX_CAPACITY / 4) * 6,
+		buildIndices(math.floor(INITIAL_VERTEX_CAPACITY / 4)))
 
 	---@format disable-next
 	return setmetatable({
@@ -308,6 +346,11 @@ function Draw.new(window)
 		indexBuffer = indexBuffer,
 		vertexCount = 0,
 		indexCount = 0,
+		vertexCapacity = INITIAL_VERTEX_CAPACITY,
+		indexCapacity = INITIAL_INDEX_CAPACITY,
+		gpuVertexCapacity = INITIAL_VERTEX_CAPACITY,
+		gpuIndexCapacity = INITIAL_INDEX_CAPACITY,
+		gpuPatternQuads = math.floor(INITIAL_VERTEX_CAPACITY / 4),
 		depthBuffer = depthBuffer,
 		depthBufferView = depthBufferView,
 		bindGroup = bindGroup,
@@ -316,8 +359,8 @@ function Draw.new(window)
 		texture = texture,
 		sampler = sampler,
 		uvScalesBuffer = uvScalesBuffer,
-		vertices = VertexArray(MAX_VERTICES),
-		indices = IndexArray(MAX_INDICES),
+		vertices = VertexArray(INITIAL_VERTEX_CAPACITY),
+		indices = IndexArray(INITIAL_INDEX_CAPACITY),
 		modelStack = modelStack,
 		modelIdentStack = modelIdentStack,
 		modelDepth = 1,
@@ -370,6 +413,8 @@ end
 ---@param texIndex number?
 ---@private
 function Draw:pushVertex(x, y, z, u, _v, nx, ny, nz, r, g, b, a, texIndex)
+	self:reserve(1, 0)
+
 	local v = self.vertices[self.vertexCount]
 	v.x, v.y, v.z = x, y, z
 	v.u, v.v = u, _v
@@ -390,6 +435,43 @@ function Draw:pushIndex(i)
 	self.indexCount = self.indexCount + 1
 end
 
+--- Make room for one more primitive, growing the CPU-side geometry arrays when
+--- the frame has outgrown them. Growth replaces the arrays, so callers must
+--- read self.vertices / self.indices *after* calling this, never before.
+---
+--- This is what removes the old fixed geometry budget: a frame is one draw call
+--- with one vertex and one index buffer, and that buffer is now resized to fit
+--- the frame instead of the frame being rejected once it filled up.
+---@param vcount number vertices the primitive needs
+---@param icount number indices the primitive needs
+---@private
+function Draw:reserve(vcount, icount)
+	local vertexCapacity = self.vertexCapacity
+	local indexCapacity = self.indexCapacity
+
+	if self.vertexCount + vcount > vertexCapacity then
+		self.vertices, self.vertexCapacity = growArray(
+			self.vertices, vertexCapacity, self.vertexCount + vcount,
+			VertexArraySize, VertexArray)
+		vertexCapacity = self.vertexCapacity
+
+		-- Quad-only frames draw from the positional pattern over the whole
+		-- vertex capacity, so the index side grows with it.
+		local forQuads = math.ceil(vertexCapacity * INDICES_PER_VERTEX)
+		if forQuads > indexCapacity then
+			self.indices, self.indexCapacity = growArray(
+				self.indices, indexCapacity, forQuads, IndexArraySize, IndexArray)
+			indexCapacity = self.indexCapacity
+		end
+	end
+
+	if self.indexCount + icount > indexCapacity then
+		self.indices, self.indexCapacity = growArray(
+			self.indices, indexCapacity, self.indexCount + icount,
+			IndexArraySize, IndexArray)
+	end
+end
+
 ---@param r number
 ---@param g number
 ---@param b number
@@ -406,6 +488,8 @@ end
 ---@param h number
 ---@format disable-next
 function Draw:rect(x, y, w, h)
+	self:reserve(4, 6)
+
 	local verts = self.vertices
 	local idxs  = self.indices
 	local vc    = self.vertexCount
@@ -413,10 +497,6 @@ function Draw:rect(x, y, w, h)
 	local r, g, b, a = self.curR, self.curG, self.curB, self.curA
 	local tex   = self.curTexture
 	local u0, v0, u1, v1 = self.texU0, self.texV0, self.texU1, self.texV1
-
-	if vc > MAX_VERTICES - 4 then
-		error("lupa: geometry buffers are full")
-	end
 
 	local v = verts[vc]
 	v.x, v.y, v.z = x, y, 0
@@ -605,12 +685,12 @@ end
 ---@param sy number
 ---@param sz number
 local function emitMesh(self, verts, indices, vcount, icount, px, py, pz, sx, sy, sz)
+	-- Grow first: this can replace self.vertices/self.indices, so the arrays are
+	-- taken afterwards and the counts are read after it too.
+	self:reserve(vcount, icount)
+
 	local base = self.vertexCount
 	local ic = self.indexCount
-
-	if base + vcount > MAX_VERTICES or ic + icount > MAX_INDICES then
-		error("lupa: geometry buffers are full; split the draw or raise MAX_VERTICES/MAX_INDICES")
-	end
 
 	local out = self.vertices
 	local idxs = self.indices
@@ -1058,6 +1138,47 @@ function Draw:resize()
 	end
 end
 
+--- Replace the GPU vertex/index buffers when a frame has outgrown them.
+---
+--- Buffers cannot be resized, so this creates bigger ones and drops the old,
+--- which means waiting for the GPU to finish with them first: frames in flight
+--- may still be reading the buffers being retired. Growth only happens when the
+--- frame size doubles, so the stall is a one-off rather than per frame.
+---@private
+function Draw:ensureGpuCapacity()
+	local device = self.device
+
+	if self.indexCapacity > self.gpuIndexCapacity then
+		local indexBuffer = device:createBuffer({
+			size = IndexArraySize * self.indexCapacity,
+			usages = { "INDEX", "COPY_DST" }
+		})
+
+		-- Re-seed the positional pattern for the new vertex capacity, so
+		-- quad-only frames can skip the index upload again.
+		local quads = math.floor(self.vertexCapacity / 4)
+		device.queue:writeBuffer(indexBuffer, IndexArraySize * quads * 6, buildIndices(quads))
+
+		device.queue:waitIdle()
+		self.indexBuffer:destroy()
+		self.indexBuffer = indexBuffer
+		self.gpuIndexCapacity = self.indexCapacity
+		self.gpuPatternQuads = quads
+	end
+
+	if self.vertexCapacity > self.gpuVertexCapacity then
+		local vertexBuffer = device:createBuffer({
+			size = VertexArraySize * self.vertexCapacity,
+			usages = { "VERTEX", "COPY_DST" }
+		})
+
+		device.queue:waitIdle()
+		self.vertexBuffer:destroy()
+		self.vertexBuffer = vertexBuffer
+		self.gpuVertexCapacity = self.vertexCapacity
+	end
+end
+
 ---@private
 function Draw:endFrame()
 	-- The default 2D orthographic projection only depends on the window size, so
@@ -1087,14 +1208,33 @@ function Draw:endFrame()
 	-- pre-allocated for this frame slot. Going through the device instead
 	-- allocates a fresh command pool and command buffer every frame and never
 	-- frees them.
+	--
+	-- Growth comes first because it can submit its own work and wait for the
+	-- queue to drain, which is best done before this frame's command buffer
+	-- starts recording.
+	self:ensureGpuCapacity()
+
 	local encoder = self.swapchain:createCommandEncoder()
+
 	encoder:writeBuffer(self.transformsBuffer, TransformsSize, transforms)
 	encoder:writeBuffer(self.lightingBuffer, LightingSize, lighting)
 	encoder:writeBuffer(self.vertexBuffer, VertexArraySize * self.vertexCount, self.vertices)
-	-- Quad-only frames match the index pattern seeded at construction, so the
-	-- upload is skipped. A frame that drew meshes wrote its own indices.
+
+	-- The index buffer normally holds the positional quad pattern, so a
+	-- quad-only frame has nothing to upload. That only holds while the pattern
+	-- still covers the quads being drawn and no mesh has overwritten it, so what
+	-- is actually tracked is how many leading quads are known to be the pattern.
+	--
+	-- A frame that drew meshes wrote its own indices over the pattern, and a
+	-- frame that outgrew the capacity the pattern was built for needs indices
+	-- past its end. Both have to upload.
+	local quadsDrawn = math.floor(self.vertexCount / 4)
 	if self.meshIndexCount > 0 then
 		encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
+		self.gpuPatternQuads = 0
+	elseif self.gpuPatternQuads < quadsDrawn then
+		encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
+		self.gpuPatternQuads = quadsDrawn
 	end
 
 	if self.uvScalesDirty then
@@ -1109,7 +1249,7 @@ function Draw:endFrame()
 	encoder:setBindGroup(0, self.bindGroup)
 	encoder:setViewport(0, 0, width, height)
 	encoder:setVertexBuffer(0, self.vertexBuffer)
-	encoder:setIndexBuffer(self.indexBuffer, "u16")
+	encoder:setIndexBuffer(self.indexBuffer, "u32")
 	encoder:drawIndexed(self.indexCount, 1, 0, 0, 0)
 	encoder:endRendering()
 
