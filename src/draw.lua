@@ -165,6 +165,83 @@ local LightingSize = ffi.sizeof("LupaLighting")
 local backend = os.getenv("BACKEND") or "vulkan"
 local shaderType = backend == "vulkan" and "spirv" or "glsl"
 
+--- Bytes of UV scale data: 256 texture slots of 2 floats.
+local UV_SCALES_SIZE = 512 * 4
+
+--- Write CPU data into a buffer, using whichever route the backend has.
+---
+--- A mapped buffer is written straight into its own memory with no command
+--- recorded and nothing submitted. OpenGL buffers are not mapped, so they go
+--- through the queue helper, which is also a direct upload (namedBufferSubData)
+--- rather than a staging copy.
+---@param device hood.Device
+---@param buffer hood.Buffer
+---@param size number
+---@param data ffi.cdata*
+local function upload(device, buffer, size, data)
+	if buffer.isMapped then
+		ffi.copy(buffer:mappedPointer(0), data, size)
+		return
+	end
+	device.queue:writeBuffer(buffer, size, data)
+end
+
+--- One frame's worth of buffers.
+---
+--- Every buffer the CPU rewrites per frame lives here, and there is one set per
+--- swapchain image. Sharing a single set would mean writing the geometry for
+--- frame N+1 into the same memory a frame still in flight is reading, which is a
+--- write-after-read hazard rather than a theoretical one: nothing orders the
+--- CPU's write against the GPU's read of the previous submission.
+---
+--- The uniform buffers are per frame for the same reason, and their sizes are
+--- exact now instead of a guessed 64 KB, which only ever needed to hold 128 and
+--- 64 bytes.
+---@param device hood.Device
+---@param vertexCapacity number
+---@param indexCapacity number
+---@return table
+local function createFrameSlot(device, vertexCapacity, indexCapacity)
+	local slot = {
+		vertexBuffer = device:createBuffer({
+			size = VertexArraySize * vertexCapacity,
+			usages = { "VERTEX", "COPY_DST" },
+			mapped = true,
+		}),
+		indexBuffer = device:createBuffer({
+			size = IndexArraySize * indexCapacity,
+			usages = { "INDEX", "COPY_DST" },
+			mapped = true,
+		}),
+		transformsBuffer = device:createBuffer({
+			size = TransformsSize,
+			usages = { "UNIFORM", "COPY_DST" },
+			mapped = true,
+		}),
+		lightingBuffer = device:createBuffer({
+			size = LightingSize,
+			usages = { "UNIFORM", "COPY_DST" },
+			mapped = true,
+		}),
+		uvScalesBuffer = device:createBuffer({
+			size = UV_SCALES_SIZE,
+			usages = { "UNIFORM", "COPY_DST" },
+			mapped = true,
+		}),
+		vertexCapacity = vertexCapacity,
+		indexCapacity = indexCapacity,
+		patternQuads = 0,
+	}
+
+	-- The positional quad pattern only has to be written once per slot, because
+	-- it depends on nothing but a quad's position in the batch.
+	local quads = math.floor(vertexCapacity / 4)
+	upload(device, slot.indexBuffer, IndexArraySize * quads * 6, buildIndices(quads))
+	slot.patternQuads = quads
+
+	return slot
+end
+
 ---@param window winit.Window
 function Draw.new(window)
 	local instance = hood.Instance.new({ backend = backend, flags = {} })
@@ -182,31 +259,12 @@ function Draw.new(window)
 		:withAttribute({ type = "f32", size = 4, offset = 32 }) -- color
 		:withAttribute({ type = "f32", size = 1, offset = 48 }) -- texture index
 
-	-- Sized from the actual budget rather than a guessed round number. The
-	-- per-frame upload is VertexArraySize * vertexCount bytes, and vertexCount
-	-- is only capped at the current capacity, so a smaller buffer means the tail
-	-- of a full batch is written past the end of the allocation. Derived here so
-	-- the two can never drift apart again. endFrame replaces these with bigger
-	-- ones when a frame outgrows them.
-	local vertexBuffer = device:createBuffer({
-		size = VertexArraySize * INITIAL_VERTEX_CAPACITY,
-		usages = { "VERTEX", "COPY_DST" }
-	})
-
-	local indexBuffer = device:createBuffer({
-		size = IndexArraySize * INITIAL_INDEX_CAPACITY,
-		usages = { "INDEX", "COPY_DST" }
-	})
-
-	local transformsBuffer = device:createBuffer({
-		size = 64 * 1024, -- Enough for 1000 4x4 matrices
-		usages = { "UNIFORM", "COPY_DST" }
-	})
-
-	local lightingBuffer = device:createBuffer({
-		size = 64 * 1024, -- Enough for 1000 point lights (16 bytes each)
-		usages = { "UNIFORM", "COPY_DST" }
-	})
+	-- One set of buffers per frame the swapchain can have in flight.
+	local frameCount = swapchain.imageCount or 1
+	local frames = {}
+	for i = 1, frameCount do
+		frames[i] = createFrameSlot(device, INITIAL_VERTEX_CAPACITY, INITIAL_INDEX_CAPACITY)
+	end
 
 	local texture = device:createTexture({
 		extents = { dim = "2d", width = MAX_TEXTURE_WIDTH, height = MAX_TEXTURE_HEIGHT, count = MAX_TEXTURES },
@@ -221,11 +279,6 @@ function Draw.new(window)
 		addressModeU = "repeat",
 		addressModeV = "repeat",
 		addressModeW = "repeat"
-	})
-
-	local uvScalesBuffer = device:createBuffer({
-		size = 64 * 1024, -- Enough for 1000 vec2 UV scales
-		usages = { "UNIFORM", "COPY_DST" }
 	})
 
 	local isVulkan = backend == "vulkan"
@@ -247,7 +300,9 @@ function Draw.new(window)
 	for i = 0, 511 do
 		uvScales[i] = 1.0
 	end
-	device.queue:writeBuffer(uvScalesBuffer, 512 * 4, uvScales)
+	for i = 1, frameCount do
+		upload(device, frames[i].uvScalesBuffer, UV_SCALES_SIZE, uvScales)
+	end
 
 	-- Build bind group layout
 	local layoutEntries = {
@@ -264,21 +319,31 @@ function Draw.new(window)
 
 	local bindGroupLayout = device:createBindGroupLayout(layoutEntries)
 
-	-- Build bind group entries
-	local bgEntries = {
-		{ binding = bindings.transforms,     type = "uniform-buffer", buffer = transformsBuffer },
-		{ binding = bindings.lighting,       type = "uniform-buffer", buffer = lightingBuffer },
-		{ binding = bindings.centralTexture, type = "texture",        texture = textureView },
-		{ binding = bindings.uvScales,       type = "uniform-buffer", buffer = uvScalesBuffer }
-	}
-	-- Sampler binds to same unit as texture in OpenGL, separate in Vulkan
-	table.insert(bgEntries, { binding = bindings.centralSampler, type = "sampler", sampler = sampler })
-	table.sort(bgEntries, function(a, b) return a.binding < b.binding end)
+	-- A bind group names concrete buffers, so each frame slot needs its own:
+	-- sharing one bind group would point every frame at the same transforms and
+	-- lighting buffers, which is exactly what the per-frame split avoids. Growth
+	-- rebuilds it too, since the buffers it names are replaced.
+	---@param slot table
+	local function bindGroupFor(slot)
+		local bgEntries = {
+			{ binding = bindings.transforms,     type = "uniform-buffer", buffer = slot.transformsBuffer },
+			{ binding = bindings.lighting,       type = "uniform-buffer", buffer = slot.lightingBuffer },
+			{ binding = bindings.centralTexture, type = "texture",        texture = textureView },
+			{ binding = bindings.uvScales,       type = "uniform-buffer", buffer = slot.uvScalesBuffer }
+		}
+		-- Sampler binds to same unit as texture in OpenGL, separate in Vulkan
+		table.insert(bgEntries, { binding = bindings.centralSampler, type = "sampler", sampler = sampler })
+		table.sort(bgEntries, function(a, b) return a.binding < b.binding end)
 
-	bindGroup = device:createBindGroup({
-		layout = bindGroupLayout,
-		entries = bgEntries
-	})
+		return device:createBindGroup({
+			layout = bindGroupLayout,
+			entries = bgEntries
+		})
+	end
+
+	for i = 1, frameCount do
+		frames[i].bindGroup = bindGroupFor(frames[i])
+	end
 
 	local pipeline = device:createPipeline({
 		layout = bindGroupLayout,
@@ -326,14 +391,6 @@ function Draw.new(window)
 		modelIdentStack[i] = true
 	end
 
-	-- The index buffer is positional and never changes while the capacity does
-	-- not, so it is written once here instead of being re-uploaded every frame.
-	-- The pattern covers the whole vertex capacity, which is what lets a
-	-- quad-only frame skip the index upload entirely.
-	device.queue:writeBuffer(indexBuffer,
-		IndexArraySize * math.floor(INITIAL_VERTEX_CAPACITY / 4) * 6,
-		buildIndices(math.floor(INITIAL_VERTEX_CAPACITY / 4)))
-
 	---@format disable-next
 	return setmetatable({
 		swapchain = swapchain,
@@ -342,23 +399,17 @@ function Draw.new(window)
 		surface = surface,
 		surfaceConfig = surfaceConfig,
 		window = window,
-		vertexBuffer = vertexBuffer,
-		indexBuffer = indexBuffer,
+		frames = frames,
+		frameCount = frameCount,
+		bindGroupFor = bindGroupFor,
 		vertexCount = 0,
 		indexCount = 0,
 		vertexCapacity = INITIAL_VERTEX_CAPACITY,
 		indexCapacity = INITIAL_INDEX_CAPACITY,
-		gpuVertexCapacity = INITIAL_VERTEX_CAPACITY,
-		gpuIndexCapacity = INITIAL_INDEX_CAPACITY,
-		gpuPatternQuads = math.floor(INITIAL_VERTEX_CAPACITY / 4),
 		depthBuffer = depthBuffer,
 		depthBufferView = depthBufferView,
-		bindGroup = bindGroup,
-		transformsBuffer = transformsBuffer,
-		lightingBuffer = lightingBuffer,
 		texture = texture,
 		sampler = sampler,
-		uvScalesBuffer = uvScalesBuffer,
 		vertices = VertexArray(INITIAL_VERTEX_CAPACITY),
 		indices = IndexArray(INITIAL_INDEX_CAPACITY),
 		modelStack = modelStack,
@@ -1110,18 +1161,18 @@ function Draw:resize()
 	})
 	local depthBufferView = depthBuffer:createView({})
 
-	-- Preallocated so pushModel/popModel never allocate.
-	local modelStack = {}
-	local modelIdentStack = {}
-	for i = 1, MODEL_STACK_MAX do
-		modelStack[i] = lpmath.mat4.identity()
-		modelIdentStack[i] = true
-	end
-
 	self.swapchain = swapchain
 	self.depthBuffer = depthBuffer
 	self.depthBufferView = depthBufferView
 	self.renderDesc.depthStencilAttachment.texture = depthBufferView
+
+	-- The reconfigured swapchain can come back with a different number of
+	-- images, which changes how many frames can be in flight. Each of those needs
+	-- its own buffers, and an index past the end of the array would otherwise
+	-- silently fall back to slot 1 and reintroduce the hazard the split avoids.
+	if (swapchain.imageCount or 1) ~= self.frameCount then
+		self:_rebuildFrames(self.vertexCapacity, self.indexCapacity)
+	end
 
 	-- Force the projection to be rebuilt for the new size, and re-derive the
 	-- camera so its aspect ratio tracks the window.
@@ -1138,45 +1189,58 @@ function Draw:resize()
 	end
 end
 
---- Replace the GPU vertex/index buffers when a frame has outgrown them.
+--- Rebuild every frame slot at a new capacity, or for a new frame count.
 ---
---- Buffers cannot be resized, so this creates bigger ones and drops the old,
---- which means waiting for the GPU to finish with them first: frames in flight
---- may still be reading the buffers being retired. Growth only happens when the
+--- Buffers cannot be resized, so this creates new ones and drops the old. Every
+--- slot is rebuilt together rather than just the one being drawn, so the slots
+--- stay interchangeable, and the old buffers are only dropped after the queue
+--- drains: frames in flight may still be reading them. Growth happens when the
 --- frame size doubles, so the stall is a one-off rather than per frame.
+---@param vertexCapacity number
+---@param indexCapacity number
+---@private
+function Draw:_rebuildFrames(vertexCapacity, indexCapacity)
+	local device = self.device
+	local frameCount = self.swapchain.imageCount or 1
+
+	device.queue:waitIdle()
+
+	local frames = {}
+	for i = 1, frameCount do
+		local slot = createFrameSlot(device, vertexCapacity, indexCapacity)
+
+		-- A fresh uv scales buffer starts as zeroes, which would collapse every
+		-- textured sample to one texel, so the current scales are re-uploaded.
+		-- The bind group names this slot's uniform buffers, so it is rebuilt
+		-- alongside them.
+		upload(device, slot.uvScalesBuffer, UV_SCALES_SIZE, self.uvScales)
+		slot.bindGroup = self.bindGroupFor(slot)
+		frames[i] = slot
+	end
+
+	if self.frames then
+		for _, old in ipairs(self.frames) do
+			old.bindGroup:destroy()
+			old.vertexBuffer:destroy()
+			old.indexBuffer:destroy()
+			old.transformsBuffer:destroy()
+			old.lightingBuffer:destroy()
+			old.uvScalesBuffer:destroy()
+		end
+	end
+
+	self.frames = frames
+	self.frameCount = frameCount
+end
+
 ---@private
 function Draw:ensureGpuCapacity()
-	local device = self.device
-
-	if self.indexCapacity > self.gpuIndexCapacity then
-		local indexBuffer = device:createBuffer({
-			size = IndexArraySize * self.indexCapacity,
-			usages = { "INDEX", "COPY_DST" }
-		})
-
-		-- Re-seed the positional pattern for the new vertex capacity, so
-		-- quad-only frames can skip the index upload again.
-		local quads = math.floor(self.vertexCapacity / 4)
-		device.queue:writeBuffer(indexBuffer, IndexArraySize * quads * 6, buildIndices(quads))
-
-		device.queue:waitIdle()
-		self.indexBuffer:destroy()
-		self.indexBuffer = indexBuffer
-		self.gpuIndexCapacity = self.indexCapacity
-		self.gpuPatternQuads = quads
+	local slot = self.frames[1]
+	if self.vertexCapacity <= slot.vertexCapacity and self.indexCapacity <= slot.indexCapacity then
+		return
 	end
 
-	if self.vertexCapacity > self.gpuVertexCapacity then
-		local vertexBuffer = device:createBuffer({
-			size = VertexArraySize * self.vertexCapacity,
-			usages = { "VERTEX", "COPY_DST" }
-		})
-
-		device.queue:waitIdle()
-		self.vertexBuffer:destroy()
-		self.vertexBuffer = vertexBuffer
-		self.gpuVertexCapacity = self.vertexCapacity
-	end
+	self:_rebuildFrames(self.vertexCapacity, self.indexCapacity)
 end
 
 ---@private
@@ -1214,11 +1278,17 @@ function Draw:endFrame()
 	-- starts recording.
 	self:ensureGpuCapacity()
 
+	-- Which swapchain image this frame is rendering into, which is also the slot
+	-- whose fence getCurrentTexture just waited on. That wait is what makes it
+	-- safe to write this slot's buffers from the CPU: the previous frame that
+	-- used them has finished.
+	local slot = self.frames[self.swapchain.currentFrame or 1] or self.frames[1]
+
 	local encoder = self.swapchain:createCommandEncoder()
 
-	encoder:writeBuffer(self.transformsBuffer, TransformsSize, transforms)
-	encoder:writeBuffer(self.lightingBuffer, LightingSize, lighting)
-	encoder:writeBuffer(self.vertexBuffer, VertexArraySize * self.vertexCount, self.vertices)
+	encoder:writeBuffer(slot.transformsBuffer, TransformsSize, transforms)
+	encoder:writeBuffer(slot.lightingBuffer, LightingSize, lighting)
+	encoder:writeBuffer(slot.vertexBuffer, VertexArraySize * self.vertexCount, self.vertices)
 
 	-- The index buffer normally holds the positional quad pattern, so a
 	-- quad-only frame has nothing to upload. That only holds while the pattern
@@ -1227,18 +1297,19 @@ function Draw:endFrame()
 	--
 	-- A frame that drew meshes wrote its own indices over the pattern, and a
 	-- frame that outgrew the capacity the pattern was built for needs indices
-	-- past its end. Both have to upload.
+	-- past its end. Both have to upload. The coverage is per slot, because each
+	-- slot has its own index buffer.
 	local quadsDrawn = math.floor(self.vertexCount / 4)
 	if self.meshIndexCount > 0 then
-		encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
-		self.gpuPatternQuads = 0
-	elseif self.gpuPatternQuads < quadsDrawn then
-		encoder:writeBuffer(self.indexBuffer, IndexArraySize * self.indexCount, self.indices)
-		self.gpuPatternQuads = quadsDrawn
+		encoder:writeBuffer(slot.indexBuffer, IndexArraySize * self.indexCount, self.indices)
+		slot.patternQuads = 0
+	elseif slot.patternQuads < quadsDrawn then
+		encoder:writeBuffer(slot.indexBuffer, IndexArraySize * self.indexCount, self.indices)
+		slot.patternQuads = quadsDrawn
 	end
 
 	if self.uvScalesDirty then
-		encoder:writeBuffer(self.uvScalesBuffer, 512 * 4, self.uvScales)
+		encoder:writeBuffer(slot.uvScalesBuffer, UV_SCALES_SIZE, self.uvScales)
 		self.uvScalesDirty = false
 	end
 
@@ -1246,10 +1317,10 @@ function Draw:endFrame()
 	renderDesc.colorAttachments[1].texture = texture:createView(self.emptyViewDesc)
 	encoder:beginRendering(renderDesc)
 	encoder:setPipeline(self.pipeline)
-	encoder:setBindGroup(0, self.bindGroup)
+	encoder:setBindGroup(0, slot.bindGroup)
 	encoder:setViewport(0, 0, width, height)
-	encoder:setVertexBuffer(0, self.vertexBuffer)
-	encoder:setIndexBuffer(self.indexBuffer, "u32")
+	encoder:setVertexBuffer(0, slot.vertexBuffer)
+	encoder:setIndexBuffer(slot.indexBuffer, "u32")
 	encoder:drawIndexed(self.indexCount, 1, 0, 0, 0)
 	encoder:endRendering()
 
