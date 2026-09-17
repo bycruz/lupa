@@ -448,5 +448,5 @@ like a mistake.
 Set up [lde](https://lde.sh).
 
 ```
-lde add lupa --git https://github.com/bycruz/lupa
+lde add lupa
 ```
