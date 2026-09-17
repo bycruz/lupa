@@ -1,18 +1,12 @@
 {
 	"name": "lupa",
+	"description": "A 2d/3d game creation framework for LuaJIT",
+	"authors": ["David Cruz <david@bycruz.dev>"],
 	"version": "0.1.0",
 	"dependencies": {
-		"hood": {
-			"path": "../hood"
-		},
-		"winit": {
-			"path": "../winit"
-		},
-		"vkapi": {
-			"path": "../vkapi"
-		},
-		"glapi": {
-			"path": "../glapi"
-		}
+		"hood": { "version": "0.1.1" },
+		"winit": { "version": "0.1.0" },
+		"glapi": { "version": "0.1.0" },
+		"vkapi": { "version": "0.1.0" }
 	}
 }
