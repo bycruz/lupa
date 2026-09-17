@@ -61,7 +61,7 @@ function App:draw(draw)
 	if self.mode == 2 then
 		-- 2D: the default orthographic view, unlit.
 		draw:setOrtho()
-		draw:clearLight()
+		draw:clearLighting()
 
 		local W, H = 1200, 720
 		local cols, rows = 40, 24
@@ -88,10 +88,15 @@ function App:draw(draw)
 		far = 300,
 	})
 
-	draw:setLight({
-		direction = { x = -0.4, y = -1.0, z = -0.3 },
-		color = { 1.0, 0.95, 0.88 },
+	draw:setLighting({
 		ambient = { 0.16, 0.19, 0.28 },
+		lights = {
+			{
+				dir = { x = -0.4, y = -1.0, z = -0.3 },
+				color = { 1.0, 0.95, 0.88 },
+				shadows = { distance = 40, cascades = 2 },
+			},
+		},
 	})
 
 	-- Ground.

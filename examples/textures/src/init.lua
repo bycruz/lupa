@@ -49,7 +49,7 @@ function App:draw(draw)
 
 	if self.mode == 1 then
 		draw:setOrtho()
-		draw:clearLight()
+		draw:clearLighting()
 
 		-- 2D: one texture, drawn many times. setTexture is state, rect draws.
 		draw:setColor(1, 1, 1, 1)
@@ -87,10 +87,11 @@ function App:draw(draw)
 		target = { x = 0, y = 0, z = 0 },
 		fov = pi / 3, near = 0.1, far = 300,
 	})
-	draw:setLight({
-		direction = { x = -0.4, y = -1.0, z = -0.3 },
-		color = { 1.0, 0.95, 0.88 },
+	draw:setLighting({
 		ambient = { 0.25, 0.27, 0.34 },
+		lights = {
+			{ dir = { x = -0.4, y = -1.0, z = -0.3 }, color = { 1.0, 0.95, 0.88 } },
+		},
 	})
 
 	draw:setColor(1, 1, 1, 1)

@@ -5,7 +5,7 @@ ffi.cdef [[
     typedef struct { float x, y, z; } LupaVec3;
 ]]
 
---- Column-major, indexed column * 4 + row.
+--- safety: column-major, indexed column * 4 + row, as std140 lays a mat4 out
 ---@class lupa.math.Mat4: ffi.cdata*
 ---@field m number[16]
 
@@ -65,8 +65,10 @@ function mat4.orthoInto(dst, left, right, bottom, top, near, far)
 	m[idx(1, 3)] = -(top + bottom) / (top - bottom)
 	m[idx(2, 0)] = 0
 	m[idx(2, 1)] = 0
-	m[idx(2, 2)] = 1 / (far - near)
-	m[idx(2, 3)] = -near / (far - near)
+	-- safety: the depth range is [0, 1], matching the perspective projection and
+	-- what a depth attachment expects
+	m[idx(2, 2)] = 1 / (near - far)
+	m[idx(2, 3)] = near / (near - far)
 	m[idx(3, 0)] = 0
 	m[idx(3, 1)] = 0
 	m[idx(3, 2)] = 0
@@ -144,7 +146,6 @@ function mat4.lookAt(eye, center, up)
 	return mat4.lookAtInto(mat4Type(), eye, center, up)
 end
 
---- dst = a * b, unrolled because the model stack calls it once per object.
 --- safety: dst may alias a or b, so every element is read into a local first
 ---@type fun(dst: lupa.math.Mat4, a: lupa.math.Mat4, b: lupa.math.Mat4)
 function mat4.mulInto(dst, a, b)

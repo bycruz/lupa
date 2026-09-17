@@ -25,7 +25,6 @@ local function ensureCaptureTarget(draw, width, height)
 	draw.captureTexture, draw.captureView, draw.captureBuffer = capture.texture, capture.view, capture.buffer
 end
 
---- Rebuild every frame slot at a new capacity, or for a new frame count.
 ---@type fun(draw: lupa.Draw, instanceCapacity: number, drawCapacity: number)
 local function rebuildFrames(draw, instanceCapacity, drawCapacity)
 	local device = draw.device
@@ -43,6 +42,11 @@ local function rebuildFrames(draw, instanceCapacity, drawCapacity)
 		-- textured sample to one texel, so the scales are re-uploaded here
 		gpu.upload(device, slot.uvScalesBuffer, gpu.uvScalesSize, draw.uvScales)
 		slot.bindGroup = draw.bindGroupFor(slot)
+		slot.overlayBindGroup = draw.overlayBindGroupFor(slot)
+		slot.shadowBindGroups = {}
+		for cascade = 1, draw.shadow.cascades do
+			slot.shadowBindGroups[cascade] = draw.shadowBindGroupFor(slot, cascade)
+		end
 		frames[i] = slot
 	end
 
@@ -50,10 +54,17 @@ local function rebuildFrames(draw, instanceCapacity, drawCapacity)
 	-- may still be reading them
 	for _, old in ipairs(draw.frames) do
 		old.bindGroup:destroy()
+		old.overlayBindGroup:destroy()
+		for cascade = 1, #old.shadowBindGroups do
+			old.shadowBindGroups[cascade]:destroy()
+			old.shadowTransforms[cascade]:destroy()
+		end
 		old.instanceBuffer:destroy()
 		old.indirectBuffer:destroy()
 		old.transformsBuffer:destroy()
 		old.lightingBuffer:destroy()
+		old.overlayTransformsBuffer:destroy()
+		old.overlayLightingBuffer:destroy()
 		old.uvScalesBuffer:destroy()
 	end
 
@@ -71,9 +82,26 @@ local function ensureGpuCapacity(draw)
 	rebuildFrames(draw, draw.instanceCapacity, draw.drawRecordCapacity)
 end
 
+---@type fun(draw: lupa.Draw, encoder: hood.CommandEncoder, slot: lupa.draw.Slot, pipeline: hood.Pipeline, bindGroup: hood.BindGroup, firstRecord: number, recordCount: number)
+local function recordPhase(draw, encoder, slot, pipeline, bindGroup, firstRecord, recordCount)
+	-- safety: hood begins the render pass when the pipeline is bound, so every
+	-- phase sets one even when it has nothing to draw
+	encoder:setPipeline(pipeline)
+	encoder:setBindGroup(0, bindGroup)
+
+	if recordCount <= 0 then
+		return
+	end
+
+	encoder:setVertexBuffer(0, draw.arena.vertexBuffer)
+	encoder:setVertexBuffer(1, slot.instanceBuffer)
+	encoder:setIndexBuffer(draw.arena.indexBuffer, "u32")
+	encoder:drawIndexedIndirect(slot.indirectBuffer, firstRecord * records.drawStride, recordCount, records.drawStride)
+end
+
 ---@param draw lupa.Draw
 ---@param encoder hood.CommandEncoder
----@param slot table
+---@param slot lupa.draw.Slot
 ---@param target hood.TextureView
 ---@param width number
 ---@param height number
@@ -83,16 +111,35 @@ local function recordFrame(draw, encoder, slot, target, width, height)
 	encoder:beginRendering(renderDesc)
 	encoder:setViewport(0, 0, width, height)
 
-	-- safety: hood begins the render pass when the pipeline is bound, so an empty
-	-- frame has to set it too
-	encoder:setPipeline(draw.pipeline)
-	encoder:setBindGroup(0, slot.bindGroup)
+	recordPhase(draw, encoder, slot, draw.pipeline, slot.bindGroup, 0, draw.sceneRecords)
 
-	if draw.drawRecordCount > 0 then
+	if draw.overlayStart then
+		recordPhase(draw, encoder, slot, draw.overlayPipeline, slot.overlayBindGroup,
+			draw.sceneRecords, draw.drawRecordCount - draw.sceneRecords)
+	end
+
+	encoder:endRendering()
+end
+
+---@type fun(draw: lupa.Draw, encoder: hood.CommandEncoder, slot: lupa.draw.Slot, cascade: number)
+local function recordShadow(draw, encoder, slot, cascade)
+	local size = draw.shadow.size
+
+	encoder:beginRendering(draw.shadowRenderDescs[cascade])
+	encoder:setViewport(0, 0, size, size)
+
+	-- safety: hood begins the render pass when the pipeline is bound
+	encoder:setPipeline(draw.shadowPipeline)
+	encoder:setBindGroup(0, slot.shadowBindGroups[cascade])
+
+	-- safety: the first cascade covers a few chunks and the last one covers a view,
+	-- so a game can name how many of the casters, nearest first, each cascade draws
+	local casters = draw.casterCounts and draw.casterCounts[cascade] or (draw.shadowRecords or draw.sceneRecords)
+	if casters > 0 then
 		encoder:setVertexBuffer(0, draw.arena.vertexBuffer)
 		encoder:setVertexBuffer(1, slot.instanceBuffer)
 		encoder:setIndexBuffer(draw.arena.indexBuffer, "u32")
-		encoder:drawIndexedIndirect(slot.indirectBuffer, 0, draw.drawRecordCount, records.drawStride)
+		encoder:drawIndexedIndirect(slot.indirectBuffer, 0, casters, records.drawStride)
 	end
 
 	encoder:endRendering()
@@ -100,6 +147,8 @@ end
 
 ---@class lupa.draw.Frame
 ---@field beginFrame fun(self: lupa.Draw)
+---@field endShadowCasters fun(self: lupa.Draw, counts: number[]?)
+---@field beginOverlay fun(self: lupa.Draw)
 ---@field endFrame fun(self: lupa.Draw)
 ---@field resize fun(self: lupa.Draw)
 ---@field captureFrame fun(self: lupa.Draw)
@@ -109,20 +158,52 @@ local frame = {}
 
 local methods = {}
 
---- Start a frame: the geometry of the previous one is dropped.
 ---@type fun(self: lupa.Draw)
 function methods.beginFrame(self)
 	batch.reset(self)
+	self.sceneRecords = 0
+	self.overlayStart = nil
+	self.shadowRecords = nil
+	self.casterCounts = nil
 end
 
---- Render this frame to a readable image as well, as a second pass over its
---- geometry, for debugging and tests.
+---@type fun(self: lupa.Draw)
+function methods.beginOverlay(self)
+	assert(self.overlayStart == nil, "lupa: beginOverlay was already called this frame")
+
+	self.sceneRecords = self.drawRecordCount
+	self.overlayStart = {
+		instances = self.instanceCount,
+		records = self.drawRecordCount,
+	}
+
+	-- safety: without this the last scene draw and the first overlay draw would
+	-- merge into one command spanning both phases
+	batch.breakBatch(self)
+end
+
+---@type fun(self: lupa.Draw, counts: number[]?)
+function methods.endShadowCasters(self, counts)
+	assert(self.shadowRecords == nil, "lupa: endShadowCasters was already called this frame")
+
+	if counts then
+		for index = 1, self.shadowCascades do
+			local count = counts[index]
+			assert(type(count) == "number" and count >= 0,
+				string.format("lupa: endShadowCasters wants how many records cascade %d draws", index))
+			counts[index] = math.min(count, self.drawRecordCount)
+		end
+	end
+
+	self.shadowRecords = self.drawRecordCount
+	self.casterCounts = counts
+end
+
 ---@type fun(self: lupa.Draw)
 function methods.captureFrame(self)
 	self.capturing = true
 end
 
---- The pixels of the last captured frame, or nothing when none is waiting.
 ---@type fun(self: lupa.Draw): number?, number?, string?
 function methods.capturePixels(self)
 	if not self.capturePending then
@@ -143,7 +224,6 @@ function methods.capturePixels(self)
 	return self.captureWidth, self.captureHeight, pixels
 end
 
---- Rebuild everything that depends on the surface size.
 ---@type fun(self: lupa.Draw)
 function methods.resize(self)
 	if self.headless then
@@ -175,7 +255,6 @@ function methods.resize(self)
 	oldDepth:destroy()
 end
 
---- The size of whatever the frame is rendered into.
 ---@type fun(self: lupa.Draw): number, number
 function methods.targetSize(self)
 	if self.headless then
@@ -195,13 +274,16 @@ function methods.endFrame(self)
 	if not self.headless then
 		texture = self.swapchain:getCurrentTexture()
 		if not texture then
-			-- safety: rebuild the swapchain and skip this frame
 			self:resize()
 			return
 		end
 	end
 
-	-- Growth first, because it waits for the queue to drain.
+	-- safety: the meshes that changed this frame have to be in the arenas before the
+	-- commands that read them are recorded and submitted
+	self.uploads:flush()
+
+	-- safety: capacity growth goes first, because it rebuilds the frame slots
 	ensureGpuCapacity(self)
 
 	-- safety: getCurrentTexture waited on this slot's fence, so the CPU may write
@@ -212,6 +294,18 @@ function methods.endFrame(self)
 	end
 
 	local encoder = self.headless and self.device:createCommandEncoder() or self.swapchain:createCommandEncoder()
+
+	self.sceneRecords = self.overlayStart and self.overlayStart.records or self.drawRecordCount
+
+	if self.shadowEnabled then
+		view.refreshShadow(self, width, height)
+	end
+
+	if self.overlayStart then
+		view.refreshOverlay(self, width, height)
+		encoder:writeBuffer(slot.overlayTransformsBuffer, records.transformsSize, self.overlayTransforms)
+		encoder:writeBuffer(slot.overlayLightingBuffer, records.lightingSize, self.overlayLighting)
+	end
 
 	encoder:writeBuffer(slot.transformsBuffer, records.transformsSize, self.transforms)
 	encoder:writeBuffer(slot.lightingBuffer, records.lightingSize, self.lighting)
@@ -227,8 +321,15 @@ function methods.endFrame(self)
 		slot.uvScalesRevision = self.uvScalesRevision
 	end
 
-	-- Headless always renders into the capture target; a window renders into it
-	-- when a capture was asked for.
+	-- safety: the shadow passes come first, because the frame pass samples their maps
+	if self.shadowEnabled then
+		for cascade = 1, self.shadowCascades do
+			encoder:writeBuffer(slot.shadowTransforms[cascade], records.shadowTransformsSize,
+				self.transforms.lightViewProj[cascade - 1])
+			recordShadow(self, encoder, slot, cascade)
+		end
+	end
+
 	local capturing = self.headless or self.capturing
 
 	if not self.headless then
@@ -256,8 +357,7 @@ function methods.endFrame(self)
 	local commandBuffer = encoder:finish()
 
 	if self.headless then
-		-- safety: headless has nothing to present, so the command buffer is
-		-- submitted on its own
+		-- safety: headless has nothing to present, so the command buffer is submitted on its own
 		self.device.queue:submit(commandBuffer)
 	else
 		self.device.queue:submit(commandBuffer, self.swapchain)

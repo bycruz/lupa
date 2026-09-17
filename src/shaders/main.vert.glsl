@@ -10,9 +10,12 @@ out gl_PerVertex {
 #define BINDING(x) layout(set = 0, binding = x)
 #endif
 
-// A mesh vertex: position, uv, and the normal as normalized bytes.
-layout(location = 0) in vec3 a_position;
-layout(location = 1) in vec2 a_uv;
+// A mesh vertex: position and uv are integers of the mesh's own size, and the normal
+// is normalized bytes with the tile it samples in the fourth.
+// safety: the two scales come from the instance, since one vertex range is drawn by
+// instances of the same mesh and only the mesh knows how big it is
+layout(location = 0) in ivec3 a_position;
+layout(location = 1) in ivec2 a_uv;
 layout(location = 2) in vec4 a_normal;
 
 // One instance: the world matrix, its color, its texture layer and the sampled
@@ -25,15 +28,19 @@ layout(location = 6) in vec4 a_model3;
 layout(location = 7) in vec4 a_color;
 layout(location = 8) in float a_textureIndex;
 layout(location = 9) in vec4 a_uvRect;
+layout(location = 10) in float a_positionScale;
+layout(location = 11) in float a_uvScale;
 
 layout(location = 0) out vec2 v_uv;
 layout(location = 1) out vec3 v_normal;
 layout(location = 2) out vec4 v_color;
 layout(location = 3) out vec3 v_worldPos;
 layout(location = 4) out float v_textureIndex;
+layout(location = 5) out float v_tile;
 
 BINDING(0) uniform Transforms {
     mat4 u_viewProj;
+    mat4 u_lightViewProj;
 };
 
 void main() {
@@ -43,9 +50,15 @@ void main() {
         vec4(a_model2, 0.0),
         a_model3);
 
-    vec4 worldPos = model * vec4(a_position, 1.0);
+    vec3 position = vec3(a_position) * a_positionScale;
+    vec2 uv = vec2(a_uv) * a_uvScale;
+    vec4 worldPos = model * vec4(position, 1.0);
     v_worldPos = worldPos.xyz;
-    v_uv = a_uvRect.xy + a_uv * a_uvRect.zw;
+
+    // safety: a vertex that names its own tile carries a uv in tiles rather than in
+    // the sampled rectangle, so the rectangle is only applied without one
+    v_tile = a_normal.w;
+    v_uv = v_tile < 0.0 ? (a_uvRect.xy + uv * a_uvRect.zw) : uv;
     v_normal = normalize(mat3(model) * a_normal.xyz);
     v_color = a_color;
     v_textureIndex = a_textureIndex;

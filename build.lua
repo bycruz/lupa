@@ -55,3 +55,5 @@ end
 
 embedShader("main", "vert")
 embedShader("main", "frag")
+embedShader("shadow", "vert")
+embedShader("shadow", "frag")

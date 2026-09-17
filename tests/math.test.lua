@@ -72,6 +72,17 @@ test.it("math: multiplying by identity changes nothing", function()
 	test.equal(ay, by)
 end)
 
+test.it("math: ortho maps the near plane to 0 and the far plane to 1", function()
+	-- safety: a shadow pass renders through an orthographic projection, so a depth
+	-- range outside [0, 1] would clip it away entirely
+	local m = lpmath.mat4.ortho(-10, 10, -10, 10, 0.5, 20.5)
+
+	local _, _, near = apply(m, 0, 0, -0.5)
+	local _, _, far = apply(m, 0, 0, -20.5)
+	almostEqual(near, 0)
+	almostEqual(far, 1)
+end)
+
 test.it("math: ortho written over a perspective leaves none of it behind", function()
 	-- safety: the frame's viewProj is written in place, so an ortho drawn after a
 	-- camera would keep the camera's terms if the write missed any of them

@@ -58,7 +58,7 @@ screenIt("assets: vertices that are not 8 floats each are rejected", function()
 
 	test.errors(function()
 		assets:mesh({ 0, 0, 0 }, { 0 })
-	end, "lupa: mesh vertices must be 8 floats each (x, y, z, nx, ny, nz, u, v); got 3")
+	end, "lupa: mesh vertices must be 8 floats each; got 3")
 end)
 
 screenIt("assets: a Wavefront file loads into triangles", function()

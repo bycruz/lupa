@@ -12,7 +12,6 @@ local intArray = ffi.typeof("int[?]")
 ---@type ffi.ctype* uint8_t[?]
 local byteArray = ffi.typeof("uint8_t[?]")
 
---- Shared by every mesh built without indices, which draw in vertex order.
 ---@type ffi.cdata*
 local noIndices = ffi.new("int[0]")
 
@@ -20,34 +19,112 @@ local noIndices = ffi.new("int[0]")
 ---@field layer number index into the texture array, as used by the shader
 ---@field width number
 ---@field height number
+---@field emission number 0 to 1 of the texture's own colour added to what lights it
+---@field cutout boolean true when only texels over half an alpha are drawn
 local Texture = {}
 Texture.__index = Texture
 
----@type fun(layer: number, width: number, height: number): lupa.Texture
-function Texture.new(layer, width, height)
-	return setmetatable({ layer = layer, width = width, height = height }, Texture)
+---@type fun(layer: number, width: number, height: number, options: lupa.TextureOptions?): lupa.Texture
+function Texture.new(layer, width, height, options)
+	return setmetatable({
+		layer = layer,
+		width = width,
+		height = height,
+		emission = options and options.emission or 0,
+		cutout = (options and options.cutout) and true or false,
+	}, Texture)
 end
 
+local VERTEX_FLOATS = 8
+local TILED_VERTEX_FLOATS = 9
+
+local HEADROOM = 1.25
+local MINIMUM_VERTEX_FLOATS = 1024
+local MINIMUM_INDICES = 1024
+
 ---@class lupa.Mesh
----@field vertices ffi.cdata* flat, 8 floats per vertex: x, y, z, nx, ny, nz, u, v
+---@field vertices ffi.cdata* flat, `stride` floats per vertex: x, y, z, nx, ny, nz, u, v, and a tile
 ---@field indices ffi.cdata* flat, 0-based triangle indices
+---@field stride number 8 floats per vertex, or 9 with a texture tile at the end
 ---@field vertexCount number
 ---@field indexCount number
+---@field vertexCapacity number floats the vertex array holds
+---@field indexCapacity number indices the index array holds
+---@field changed boolean? set by update, cleared when the draw re-uploads it
+---@field positionScale number? what one unit of a stored vertex position is worth
+---@field uvScale number? what one unit of a stored vertex uv is worth
 local Mesh = {}
 Mesh.__index = Mesh
 
----@type fun(vertices: number[], indices: number[]?): lupa.Mesh
-function Mesh.new(vertices, indices)
-	if #vertices % 8 ~= 0 then
-		error("lupa: mesh vertices must be 8 floats each (x, y, z, nx, ny, nz, u, v); got " .. #vertices)
+---@type fun(vertices: number[], indices: number[]?, stride: number?): lupa.Mesh
+function Mesh.new(vertices, indices, stride)
+	local mesh = setmetatable({
+		vertices = false,
+		indices = false,
+		stride = stride or VERTEX_FLOATS,
+		vertexCount = 0,
+		indexCount = 0,
+		vertexCapacity = 0,
+		indexCapacity = 0,
+	}, Mesh)
+
+	mesh:update(vertices, indices, stride)
+
+	return mesh
+end
+
+--- safety: the draw re-uploads a changed mesh the next time it draws it, and
+--- reuses the space the mesh already holds while the new geometry fits there
+---@type fun(self: lupa.Mesh, vertices: number[], indices: number[]?, stride: number?)
+function Mesh:update(vertices, indices, stride)
+	stride = stride or VERTEX_FLOATS
+	if stride ~= VERTEX_FLOATS and stride ~= TILED_VERTEX_FLOATS then
+		error("lupa: a mesh vertex is 8 floats, or 9 with a texture tile; got a stride of " .. stride)
+	end
+	if #vertices % stride ~= 0 then
+		error(string.format("lupa: mesh vertices must be %d floats each; got %d", stride, #vertices))
 	end
 
-	return setmetatable({
-		vertices = floatArray(#vertices, vertices),
-		indices = indices and intArray(#indices, indices) or noIndices,
-		vertexCount = #vertices / 8,
-		indexCount = indices and #indices or 0,
-	}, Mesh)
+	self.vertices = floatArray(#vertices, vertices)
+	self.indices = indices and intArray(#indices, indices) or noIndices
+	self.stride = stride
+	self.vertexCount = #vertices / stride
+	self.indexCount = indices and #indices or 0
+	self.vertexCapacity = #vertices
+	self.indexCapacity = indices and #indices or 0
+	self.changed = true
+end
+
+---@type fun(self: lupa.Mesh, vertices: ffi.cdata*, vertexCount: number, indices: ffi.cdata*?, indexCount: number, stride: number?)
+function Mesh:updateFromData(vertices, vertexCount, indices, indexCount, stride)
+	stride = stride or VERTEX_FLOATS
+	local floats = vertexCount * stride
+
+	-- safety: room to spare rather than a power of two, because a world holds thousands
+	-- of these and doubling from one wastes most of what it holds
+	if self.vertexCapacity < floats then
+		local capacity = math.max(HEADROOM * floats, MINIMUM_VERTEX_FLOATS)
+		self.vertices = floatArray(capacity)
+		self.vertexCapacity = capacity
+	end
+
+	if self.indexCapacity < indexCount then
+		local capacity = math.max(HEADROOM * indexCount, MINIMUM_INDICES)
+		self.indices = intArray(capacity)
+		self.indexCapacity = capacity
+	end
+
+	if floats > 0 then
+		ffi.copy(self.vertices, vertices, floats * 4)
+	end
+	if indexCount > 0 then
+		ffi.copy(self.indices, indices, indexCount * 4)
+	end
+
+	self.stride = stride
+	self.vertexCount = vertexCount
+	self.indexCount = indexCount
+	self.changed = true
 end
 
 ---@type fun(path: string, what: string): string
@@ -123,7 +200,6 @@ function Assets.new(draw)
 	}, Assets)
 end
 
---- Load a PNG into the texture array, cached by path.
 ---@type fun(self: lupa.Assets, path: string): lupa.Texture
 function Assets:image(path)
 	local cached = self.images[path]
@@ -140,14 +216,11 @@ function Assets:image(path)
 	return texture
 end
 
---- Build a mesh from flat vertex and index arrays: 8 floats per vertex and
---- 0-based triangles, which may be omitted to draw the vertices in order.
----@type fun(self: lupa.Assets, vertices: number[], indices: number[]?): lupa.Mesh
-function Assets:mesh(vertices, indices)
-	return Mesh.new(vertices, indices)
+---@type fun(self: lupa.Assets, vertices: number[], indices: number[]?, stride: number?): lupa.Mesh
+function Assets:mesh(vertices, indices, stride)
+	return Mesh.new(vertices, indices, stride)
 end
 
---- Load a Wavefront .obj into a mesh, cached by path.
 ---@type fun(self: lupa.Assets, path: string): lupa.Mesh
 function Assets:obj(path)
 	local cached = self.meshes[path]
@@ -162,11 +235,10 @@ function Assets:obj(path)
 	return mesh
 end
 
---- Build a texture from raw RGBA8 pixels you supply yourself.
----@type fun(self: lupa.Assets, width: number, height: number, pixels: ffi.cdata*): lupa.Texture
-function Assets:texture(width, height, pixels)
+---@type fun(self: lupa.Assets, width: number, height: number, pixels: ffi.cdata*, options: lupa.TextureOptions?): lupa.Texture
+function Assets:texture(width, height, pixels, options)
 	width, height, pixels = fit(width, height, pixels, self.draw.maxTextureWidth, self.draw.maxTextureHeight)
-	return Texture.new(self.draw:addTexture(width, height, pixels), width, height)
+	return Texture.new(self.draw:addTexture(width, height, pixels, options), width, height, options)
 end
 
 return Assets

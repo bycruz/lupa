@@ -1,9 +1,11 @@
---- Minimal PNG decoder, 8- and 16-bit non-interlaced, over the system zlib.
 local ffi = require("ffi")
 
 ffi.cdef [[
 	int uncompress(unsigned char *dest, unsigned long *destLen,
 	               const unsigned char *source, unsigned long sourceLen);
+	unsigned long compressBound(unsigned long sourceLen);
+	int compress2(unsigned char *dest, unsigned long *destLen,
+	              const unsigned char *source, unsigned long sourceLen, int level);
 ]]
 
 local zlib = ffi.load("z")
@@ -22,8 +24,7 @@ local bytePointer = ffi.typeof("const unsigned char*")
 
 local PNG_SIGNATURE = "\137PNG\r\n\26\n"
 
---- Channels per pixel and where each channel sits, by PNG color type. Type 3 is
---- the palette, whose colors come from the PLTE chunk.
+-- safety: type 3 is the palette, whose colors come from the PLTE chunk rather than here
 local FORMAT = {
 	[0] = { channels = 1, gray = true },
 	[2] = { channels = 3, r = 0, g = 1, b = 2 },
@@ -33,6 +34,44 @@ local FORMAT = {
 }
 
 local M = {}
+
+---@type fun(value: number): string
+local function packU32(value)
+	return string.char(math.floor(value / 16777216) % 256, math.floor(value / 65536) % 256,
+		math.floor(value / 256) % 256, value % 256)
+end
+
+---@type number[]
+local CRC_TABLE = {}
+do
+	-- safety: the table is built once rather than per chunk, and a PNG needs a checksum
+	-- over every chunk it holds
+	for index = 0, 255 do
+		local value = index
+		for _ = 1, 8 do
+			value = bit.band(value, 1) == 1 and bit.bxor(0xEDB88320, bit.rshift(value, 1)) or bit.rshift(value, 1)
+		end
+		CRC_TABLE[index] = value
+	end
+end
+
+---@type fun(s: string): number
+local function crc32(s)
+	local crc = 0xFFFFFFFF
+
+	for index = 1, #s do
+		crc = bit.bxor(CRC_TABLE[bit.band(bit.bxor(crc, s:byte(index)), 0xFF)], bit.rshift(crc, 8))
+	end
+
+	return bit.band(bit.bnot(crc), 0xFFFFFFFF)
+end
+
+--- One chunk: its length, its kind, its body and the checksum of the last two.
+---@type fun(kind: string, body: string): string
+local function chunk(kind, body)
+	local payload = kind .. body
+	return packU32(#body) .. payload .. packU32(crc32(payload))
+end
 
 ---@type fun(s: string, i: number): number
 local function u32(s, i)
@@ -52,7 +91,6 @@ local function paeth(a, b, c)
 	return c
 end
 
---- Undo the per-scanline filters in place.
 ---@type fun(raw: ffi.cdata*, height: number, stride: number, bpp: number)
 local function unfilter(raw, height, stride, bpp)
 	local pitch = stride + 1
@@ -63,7 +101,7 @@ local function unfilter(raw, height, stride, bpp)
 		local prev = cur - pitch
 
 		if filter == 0 then
-			-- no filter
+			-- safety: filter 0 needs no undo, and the empty branch keeps it out of the error below
 		elseif filter == 1 then
 			for x = bpp, stride - 1 do
 				raw[cur + x] = (raw[cur + x] + raw[cur + x - bpp]) % 256
@@ -208,6 +246,38 @@ function M.decode(data)
 	end
 
 	return width, height, pixels
+end
+
+--- The bytes of a PNG holding these pixels, which are rgba8 with a row at a time from the
+--- top left, the way decode hands them back.
+---
+--- safety: this is what the loader reads, so what it writes and what it reads are one
+--- format rather than two that agree today: 8 bits a channel, no interlacing, and one
+--- filter of none per row
+---@type fun(width: number, height: number, pixels: ffi.cdata*): string
+function M.encode(width, height, pixels)
+	local stride = width * 4
+	local raw = byteArray(height * (stride + 1))
+
+	for y = 0, height - 1 do
+		raw[y * (stride + 1)] = 0
+		ffi.copy(raw + y * (stride + 1) + 1, ffi.cast(bytePointer, pixels) + y * stride, stride)
+	end
+
+	local bound = zlib.compressBound(height * (stride + 1))
+	local deflated = byteArray(bound)
+	local length = ulongArray(1, { bound })
+	local code = zlib.compress2(deflated, length, raw, height * (stride + 1), 6)
+	if code ~= 0 then
+		error("lupa: could not compress a PNG (zlib code " .. code .. ")")
+	end
+
+	local header = packU32(width) .. packU32(height) .. string.char(8, 6, 0, 0, 0)
+
+	return PNG_SIGNATURE
+		.. chunk("IHDR", header)
+		.. chunk("IDAT", ffi.string(deflated, tonumber(length[0])))
+		.. chunk("IEND", "")
 end
 
 return M

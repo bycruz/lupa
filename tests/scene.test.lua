@@ -24,7 +24,7 @@ end
 ---@type fun(d: lupa.Draw)
 local function flat(d)
 	d:setOrtho()
-	d:clearLight()
+	d:clearLighting()
 	d:clearTexture()
 end
 
@@ -177,4 +177,39 @@ screenIt("scene: a loaded mesh is drawn through the model stack", function()
 	-- and the hole in the middle is not.
 	expectAt(pixels, "on the rim", math.floor(W / 2) + 26, math.floor(H / 2), 1, 0.5, 0)
 	expectAt(pixels, "in the hole", math.floor(W / 2), math.floor(H / 2), 0.1, 0.1, 0.1)
+end)
+
+screenIt("scene: a directional light casts a shadow", function()
+	-- The camera looks straight down, so world x is screen x and a shadow offset
+	-- along the light is visible without any perspective to account for.
+	local function scene(shadows)
+		return screen:render(function(d)
+			flat(d)
+			d:setCamera({ position = { 0, 12, 0 }, target = { 0, 0, 0 }, up = { 0, 0, -1 } })
+			d:setLighting({ ambient = { 0.05, 0.05, 0.05 }, lights = { { dir = { 1, -1, 0 }, color = { 1, 1, 1 }, shadows = shadows } } })
+
+			d:setColor(1, 1, 1, 1)
+			d:plane(0, 0, 0, 20, 20)
+			d:cube(0, 1, 0, 2)
+		end)
+	end
+
+	---@param pixels tests.Pixels
+	---@return fun(worldX: number): number
+	local function brightnessAt(pixels)
+		local perUnit = 150 / (12 * math.tan(math.pi / 6))
+		return function(worldX)
+			local r, g, b = pixels(math.floor(200 + worldX * perUnit), 150)
+			return (r + g + b) / 3
+		end
+	end
+
+	-- The cube stands at x = 0 and the light leans towards +x, so the plane
+	-- behind it is shadowed from x = -1 out to x = 3 and lit away from that.
+	local shadowed = brightnessAt(scene(true))
+	local lit = brightnessAt(scene(false))
+
+	test.less(shadowed(2.5), 60)
+	test.greater(shadowed(-3), 150)
+	test.greater(lit(2.5), 150)
 end)

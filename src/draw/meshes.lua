@@ -1,34 +1,26 @@
 local ffi = require("ffi")
 
---- The built-in primitives, as flat arrays of x, y, z, nx, ny, nz, u, v per
---- vertex, centred on the origin and wound counter-clockwise.
 local CUBE_VERTICES = ffi.new("float[192]", {
-	-- +Z
 	-0.5, -0.5,  0.5,  0,  0,  1,  0, 1,
 	 0.5, -0.5,  0.5,  0,  0,  1,  1, 1,
 	 0.5,  0.5,  0.5,  0,  0,  1,  1, 0,
 	-0.5,  0.5,  0.5,  0,  0,  1,  0, 0,
-	-- -Z
 	 0.5, -0.5, -0.5,  0,  0, -1,  0, 1,
 	-0.5, -0.5, -0.5,  0,  0, -1,  1, 1,
 	-0.5,  0.5, -0.5,  0,  0, -1,  1, 0,
 	 0.5,  0.5, -0.5,  0,  0, -1,  0, 0,
-	-- +X
 	 0.5, -0.5,  0.5,  1,  0,  0,  0, 1,
 	 0.5, -0.5, -0.5,  1,  0,  0,  1, 1,
 	 0.5,  0.5, -0.5,  1,  0,  0,  1, 0,
 	 0.5,  0.5,  0.5,  1,  0,  0,  0, 0,
-	-- -X
 	-0.5, -0.5, -0.5, -1,  0,  0,  0, 1,
 	-0.5, -0.5,  0.5, -1,  0,  0,  1, 1,
 	-0.5,  0.5,  0.5, -1,  0,  0,  1, 0,
 	-0.5,  0.5, -0.5, -1,  0,  0,  0, 0,
-	-- +Y
 	-0.5,  0.5,  0.5,  0,  1,  0,  0, 1,
 	 0.5,  0.5,  0.5,  0,  1,  0,  1, 1,
 	 0.5,  0.5, -0.5,  0,  1,  0,  1, 0,
 	-0.5,  0.5, -0.5,  0,  1,  0,  0, 0,
-	-- -Y
 	-0.5, -0.5, -0.5,  0, -1,  0,  0, 1,
 	 0.5, -0.5, -0.5,  0, -1,  0,  1, 1,
 	 0.5, -0.5,  0.5,  0, -1,  0,  1, 0,
@@ -53,7 +45,7 @@ local PLANE_VERTICES = ffi.new("float[32]", {
 
 local PLANE_INDICES = ffi.new("int[6]", { 0, 1, 2, 0, 2, 3 })
 
---- Unit quad for 2D rectangles, with v = 0 along the top edge.
+-- safety: v = 0 is the quad's top edge, so an image drawn in a rect is not flipped
 local RECT_VERTICES = ffi.new("float[32]", {
 	-0.5, -0.5, 0,  0, 0, 1,  0, 1,
 	 0.5, -0.5, 0,  0, 0, 1,  1, 1,
@@ -68,12 +60,12 @@ local function meshOf(vertices, indices, vertexCount, indexCount)
 	return {
 		vertices = vertices,
 		indices = indices,
+		stride = 8,
 		vertexCount = vertexCount,
 		indexCount = indexCount,
 	}
 end
 
---- Unit UV sphere, cached per tessellation because a scene usually uses one.
 ---@type table<number, lupa.Mesh>
 local sphereCache = {}
 
@@ -104,11 +96,11 @@ local function sphere(segments)
 			verts[v] = x
 			verts[v + 1] = y
 			verts[v + 2] = z
-			-- On a sphere centred at the origin the normal is the position doubled.
+			-- safety: the normal is the position doubled, which is only unit because the
+			-- sphere is built with a radius of 0.5
 			verts[v + 3] = x * 2
 			verts[v + 4] = y * 2
 			verts[v + 5] = z * 2
-			-- Equirectangular UVs, so a plain image wraps around the sphere.
 			verts[v + 6] = seg / segments
 			verts[v + 7] = ring / rings
 			v = v + 8

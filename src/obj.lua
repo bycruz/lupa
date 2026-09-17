@@ -1,5 +1,3 @@
---- Wavefront OBJ parsing: positions, UVs, normals and fan-triangulated faces,
---- into lupa's flat vertex layout plus 0-based triangle indices.
 local M = {}
 
 ---@type fun(corner: string): number?, number?, number?
@@ -22,7 +20,7 @@ local function parseCorner(corner)
 	return nil
 end
 
---- OBJ indices are 1-based, and negatives count back from the list so far.
+-- safety: OBJ indices are 1-based, and a negative one counts back from the list so far
 ---@type fun(index: number?, count: number): number?
 local function resolve(index, count)
 	if not index then
@@ -40,7 +38,7 @@ function M.parse(text)
 	local positionsSeen, texcoordsSeen, normalsSeen = 0, 0, 0
 
 	local vertices, indices = {}, {}
-	local corners = {} -- "vi/ti/ni" -> output vertex index
+	local corners = {}
 	local cornerCount, unique = 0, 0
 
 ---@type fun(vi: number, ti: number?, ni: number?): number, number
@@ -121,7 +119,6 @@ function M.parse(text)
 		normalsSeen = normalsSeen + 1
 	end
 
-	--- A file without normals gets a flat one per triangle, so lighting works.
 ---@type fun(a: number, b: number, c: number): number, number, number
 	local function flatNormal(a, b, c)
 		local e1x, e1y, e1z = positions[b + 1] - positions[a + 1],
@@ -159,7 +156,6 @@ function M.parse(text)
 			return
 		end
 
-		-- Fan-triangulate: 0,1,2  0,2,3  0,3,4 ...
 		local first, firstVi = emitCorner(face[1][1], face[1][2], face[1][3])
 		local prev, prevVi = emitCorner(face[2][1], face[2][2], face[2][3])
 
