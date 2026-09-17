@@ -37,6 +37,8 @@ local MAX_DELTA = 0.1
 
 ---@class lupa.RunOptions: lupa.DrawOptions
 ---@field frames number? stop after this many frames; without it a headless run ends when App:quit() is called
+---@field width number? size of the window a windowed run opens, defaults to 1200
+---@field height number? defaults to 720
 
 ---@generic T
 ---@param app lupa.App<T>
@@ -90,7 +92,8 @@ function lupa.run(app, options)
 	end
 
 	local eventLoop = winit.EventLoop.new()
-	local window = winit.Window.fromEventLoop(eventLoop)
+	local window = winit.Window.new(eventLoop, options.width or 1200, options.height or 720)
+	eventLoop:register(window)
 
 	local draw = Draw.new(window)
 	local assets = Assets.new(draw)
