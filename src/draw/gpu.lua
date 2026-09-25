@@ -234,22 +234,19 @@ end
 
 ---@type fun(device: hood.Device, size: number, cascades: number): lupa.draw.ShadowTargets
 local function createShadowTargets(device, size, cascades)
+	-- safety: the map is a depth target the frame samples directly. Packing the depth
+	-- into a colour target instead meant writing a colour target and a depth target and
+	-- then reading the depth back out of four bytes, which is both more bytes per texel
+	-- and four fetches per comparison
 	local map = device:createTexture({
 		extents = { dim = "2d", width = size, height = size, count = cascades },
-		format = "rgba8unorm",
+		format = "depth32float",
 		usages = { "RENDER_ATTACHMENT", "TEXTURE_BINDING" },
 	})
 
-	local depth = device:createTexture({
-		extents = { dim = "2d", width = size, height = size, count = cascades },
-		format = "depth24plus",
-		usages = { "RENDER_ATTACHMENT" },
-	})
-
-	local layers, depthLayers = {}, {}
+	local layers = {}
 	for index = 0, cascades - 1 do
 		layers[index + 1] = map:createView({ baseArrayLayer = index, layerCount = 1 })
-		depthLayers[index + 1] = depth:createView({ baseArrayLayer = index, layerCount = 1 })
 	end
 
 	return {
@@ -258,13 +255,15 @@ local function createShadowTargets(device, size, cascades)
 		map = map,
 		view = map:createView({}),
 		layers = layers,
-		depth = depth,
-		depthLayers = depthLayers,
+		-- safety: a depth map is compared by the sampler rather than read and compared
+		-- by the shader, so it goes through a comparison sampler, and it is the linear
+		-- filtering here that makes a tap cover four texels instead of one
 		sampler = device:createSampler({
-			minFilter = "nearest",
-			magFilter = "nearest",
+			minFilter = "linear",
+			magFilter = "linear",
 			mipmapFilter = "nearest",
 			lodMaxClamp = 0,
+			compareOp = "less-equal",
 			addressModeU = "clamp-to-edge",
 			addressModeV = "clamp-to-edge",
 			addressModeW = "clamp-to-edge",
@@ -272,21 +271,21 @@ local function createShadowTargets(device, size, cascades)
 	}
 end
 
--- safety: the maps clear to far, so a texel nothing was drawn into leaves what it covers lit
+-- safety: the maps clear to far, so a texel nothing was drawn into leaves what it covers
+-- lit. There is no colour attachment at all: the depth the pass writes is the depth the
+-- frame reads back, and a pass with no colour target still has to be told how to end
 ---@type fun(shadow: lupa.draw.ShadowTargets): hood.RenderPassDescriptor[]
 local function createShadowRenderDescs(shadow)
 	local descs = {}
 	for index = 1, shadow.cascades do
+		-- safety: no flag says the frame samples this afterwards. The map was made with
+		-- TEXTURE_BINDING, and that is what makes a depth map one that is read back, the
+		-- same way a texture's usages say what it is for everywhere else
 		descs[index] = {
-			colorAttachments = {
-				{
-					op = { type = "clear", color = { r = 1, g = 1, b = 1, a = 1 } },
-					texture = shadow.layers[index],
-				},
-			},
+			colorAttachments = {},
 			depthStencilAttachment = {
 				op = { type = "clear", depth = 1 },
-				texture = shadow.depthLayers[index],
+				texture = shadow.layers[index],
 			},
 		}
 	end

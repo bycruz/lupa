@@ -4,9 +4,9 @@
 	"authors": ["David Cruz <david@bycruz.dev>"],
 	"version": "0.1.0",
 	"dependencies": {
-		"hood": { "version": "0.1.1" },
-		"winit": { "version": "0.1.0" },
-		"glapi": { "version": "0.1.0" },
-		"vkapi": { "version": "0.1.0" }
+		"hood": { "version": "0.2", "features": ["vk"] },
+		"winit": { "version": "0.1" },
+		"glapi": { "version": "0.1" },
+		"vkapi": { "version": "0.1" }
 	}
 }

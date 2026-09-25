@@ -186,6 +186,21 @@ lighting is set, so the counts can be worked out while the casters are drawn. Re
 drawn after the call are still in the frame, they are just not in any map. A point
 light never casts, because that would be six maps per cascade.
 
+A frame that asks for shadows and never calls this draws *every* record into *every*
+cascade, so a scene drawn as one pass pays for it once per cascade. `lupa` prints a
+warning the first time that happens in a run. Calling it is what makes the cost one pass
+over the casters per cascade rather than one pass over the whole frame per cascade, so
+it is worth doing even when every record casts:
+
+```lua
+draw:endShadowCasters()   -- everything drawn so far casts, and nothing after it does
+```
+
+Past that, `cascades` is the knob with the most cost in it, because the whole bill is
+per cascade: four cascades of a scene is four passes over its casters and four maps'
+worth of rasterization. A view that does not need the far end sharp is cheaper with two
+or three than with four, and `distance` cuts the geometry each of them draws.
+
 `clearLighting()` turns the shadows off with the lights, and `tools/shadowprobe.lua`
 measures what a change to any of this did to a scene: acne on a lit surface, how wide
 the fade at the edge of a shadow is, and whether an occluder 60 units away casts at

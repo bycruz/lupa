@@ -323,6 +323,16 @@ function methods.endFrame(self)
 
 	-- safety: the shadow passes come first, because the frame pass samples their maps
 	if self.shadowEnabled then
+		-- safety: without endShadowCasters every cascade draws every record in the frame,
+		-- which is the whole scene rasterized once per cascade. That is a large and silent
+		-- cost, so it is said out loud once rather than left to be discovered in a profile
+		if self.shadowRecords == nil and not self.warnedShadowCasters then
+			self.warnedShadowCasters = true
+			print("lupa: this frame asks for shadows but never called endShadowCasters, so "
+				.. "every record is drawn into every cascade. Call draw:endShadowCasters() "
+				.. "after the casters are drawn to draw only those.")
+		end
+
 		for cascade = 1, self.shadowCascades do
 			encoder:writeBuffer(slot.shadowTransforms[cascade], records.shadowTransformsSize,
 				self.transforms.lightViewProj[cascade - 1])

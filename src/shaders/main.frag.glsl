@@ -5,13 +5,13 @@
 #define TEXTURE2D_ARRAY sampler2DArray
 #define SAMPLE_TEXTURE(tex, coord) texture(tex, coord)
 #define SAMPLE_TEXTURE_GRAD(tex, coord, ddx, ddy) textureGrad(tex, coord, ddx, ddy)
-#define SAMPLE_SHADOW(tex, coord) texture(tex, coord)
+#define SAMPLE_SHADOW_COMPARE(tex, coord) texture(tex, coord)
 #else
 #define BINDING(x) layout(set = 0, binding = x)
 #define TEXTURE2D_ARRAY texture2DArray
 #define SAMPLE_TEXTURE(tex, sampler, coord) texture(sampler2DArray(tex, sampler), coord)
 #define SAMPLE_TEXTURE_GRAD(tex, sampler, coord, ddx, ddy) textureGrad(sampler2DArray(tex, sampler), coord, ddx, ddy)
-#define SAMPLE_SHADOW(tex, sampler, coord) texture(sampler2DArray(tex, sampler), coord)
+#define SAMPLE_SHADOW_COMPARE(tex, sampler, coord) texture(sampler2DArrayShadow(tex, sampler), coord)
 #endif
 
 layout(location = 0) in vec2 v_uv;
@@ -86,27 +86,26 @@ BINDING(4) uniform TextureScales {
     vec4 u_uvScales[256];
 };
 
-// safety: a depth attachment cannot be sampled in the same frame, so a shadow map is
-// a color target holding the fragment depth packed into its channels, and one layer of
-// the array per cascade
+// safety: the shadow map is a depth target, so it is sampled through a comparison
+// sampler: the hardware compares the reference the shader gives it against the texels
+// under the tap and returns how many of them passed. On Vulkan the sampler is an object
+// of its own and on OpenGL it rides on the texture's unit, which is why the two declare
+// the binding differently
 #ifndef VULKAN
-BINDING(5) uniform sampler2DArray u_shadow;
+BINDING(5) uniform sampler2DArrayShadow u_shadow;
 #else
 BINDING(5) uniform texture2DArray u_shadow;
 BINDING(6) uniform sampler u_shadowSampler;
 #endif
 
-float unpackDepth(vec4 rgba) {
-    return dot(rgba, vec4(1.0, 1.0 / 255.0, 1.0 / 65025.0, 1.0 / 16581375.0));
-}
-
-// One texel of one cascade's map. A cascade is a layer of the array rather than a
-// texture of its own, so a frame samples all of them through one binding.
-float sampleShadowMap(vec2 uv, int cascade) {
+// How much of the map under this uv stands in front of the reference. The hardware does
+// one comparison per texel the tap covers and filters between them, so a tap returns a
+// share rather than a yes or no, and the filtering is what makes a soft edge soft
+float sampleShadowMap(vec2 uv, float reference, int cascade) {
 #ifdef VULKAN
-    return unpackDepth(SAMPLE_SHADOW(u_shadow, u_shadowSampler, vec3(uv, float(cascade))));
+    return SAMPLE_SHADOW_COMPARE(u_shadow, u_shadowSampler, vec4(uv, float(cascade), reference));
 #else
-    return unpackDepth(SAMPLE_SHADOW(u_shadow, vec3(uv, float(cascade))));
+    return SAMPLE_SHADOW_COMPARE(u_shadow, vec4(uv, float(cascade), reference));
 #endif
 }
 
@@ -126,9 +125,10 @@ float cascadeTexel(int cascade) {
         : u_shadowTexels.w;
 }
 
-// One comparison against the map of one cascade: is this piece of the world closer to
-// the light than what the map holds for it.
-float sampleCascade(int cascade, float texel, vec3 worldPos, vec3 normal, vec2 offset) {
+// Where one point of the world lands in one cascade's map, and how far it stands from
+// the light once it is there. The filter projects a surface once through this and then
+// only moves the offset, because every tap of it compares the same point of the world.
+void projectCascade(int cascade, float texel, vec3 worldPos, vec3 normal, out float depth, out vec2 base) {
     // safety: a surface is sampled where it stands pushed out along its own normal by
     // a texel or two. Up close a texel of the map covers several units of the world, so
     // the map's idea of where the surface is lands either side of it, and without the
@@ -137,38 +137,54 @@ float sampleCascade(int cascade, float texel, vec3 worldPos, vec3 normal, vec2 o
 
     vec4 lightPos = u_lightViewProj[cascade] * vec4(at, 1.0);
     vec3 proj = lightPos.xyz / lightPos.w;
-    proj.xy = proj.xy * 0.5 + 0.5;
     // safety: the map holds gl_FragCoord.z, which Vulkan already reports in [0, 1]
     // while OpenGL remaps its [-1, 1] clip depth into the depth range, and hood's
     // Vulkan viewport flip also turns the map's rows the other way up
 #ifdef VULKAN
-    proj.y = 1.0 - proj.y;
+    depth = proj.z;
+    base = vec2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
 #else
-    proj.z = proj.z * 0.5 + 0.5;
+    depth = proj.z * 0.5 + 0.5;
+    base = proj.xy * 0.5 + 0.5;
 #endif
-    if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) {
+}
+
+// One comparison against the map of one cascade at a uv the caller has already placed:
+// how much of what the map holds there stands in front of this point of the world. The
+// comparison itself is the sampler's, and comes back filtered, so a tap is a share.
+float tapCascade(int cascade, vec2 uv, float reference) {
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         return 1.0;
     }
 
-    float closest = sampleShadowMap(proj.xy + offset, cascade);
-    return proj.z - u_shadowBias > closest ? 0.0 : 1.0;
+    return sampleShadowMap(uv, reference, cascade);
 }
 
 // Nine taps in a square around the sample, weighted so the middle counts for most of
 // it. What the filter buys is the few texels of fade that turn the staircase of a hard
 // edge into a line; the width of it is what a game sets to choose how soft that is.
 float filterCascade(int cascade, float texel, vec3 worldPos, vec3 normal, float width) {
-    float lit = 0.0;
+    float depth;
+    vec2 base;
+    projectCascade(cascade, texel, worldPos, normal, depth, base);
 
-    for (int y = -1; y <= 1; y++) {
-        for (int x = -1; x <= 1; x++) {
-            vec2 offset = vec2(float(x), float(y)) * u_shadowTexel * width;
-            float weight = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0);
-            lit += weight * sampleCascade(cascade, texel, worldPos, normal, offset);
+    // safety: the width is in shadow texels, so a step between taps is a whole texel of
+    // the map times it, taken in the map's own uv. The depth the taps are compared
+    // against is the surface's own, computed once above rather than per tap
+    vec2 step = vec2(u_shadowTexel * width);
+    float threshold = depth - u_shadowBias;
+
+    float lit = 0.0;
+    if (depth <= 1.0) {
+        for (int y = -1; y <= 1; y++) {
+            for (int x = -1; x <= 1; x++) {
+                float weight = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0);
+                lit += weight * tapCascade(cascade, base + vec2(float(x), float(y)) * step, threshold);
+            }
         }
     }
 
-    return lit * (1.0 / 16.0);
+    return depth > 1.0 ? 1.0 : lit * (1.0 / 16.0);
 }
 
 // Which cascade covers this piece of the world, and how much of it is handed to the
