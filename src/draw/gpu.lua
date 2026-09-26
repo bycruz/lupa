@@ -321,6 +321,7 @@ end
 ---@field swapchain hood.Swapchain? nil when headless
 ---@field window winit.Window? nil when headless
 ---@field headless boolean
+---@field targetView hood.TextureView? the texture of somebody else's a frame is drawn into, when there is one
 ---@field targetWidth number
 ---@field targetHeight number
 ---@field frameCount number frames that can be in flight
@@ -371,14 +372,27 @@ local gpu = {}
 ---@type fun(window: winit.Window?, options: lupa.DrawOptions?): lupa.draw.Gpu
 function gpu.new(window, options)
 	options = options or {}
-	local headless = options.headless or false
 
-	local instance = hood.Instance.new({
-		backend = backend,
-		flags = headless and { "headless" } or {},
-	})
-	local adapter = instance:requestAdapter({ powerPreference = "high-performance" })
-	local device = adapter:requestDevice()
+	local target = options.target
+	-- safety: a draw handed a device of somebody else's has no window of its own, since a window
+	-- is a surface on an instance this never made
+	local borrowed = options.device
+	local headless = options.headless or (borrowed ~= nil and window == nil)
+
+	assert(not (borrowed ~= nil and window ~= nil),
+		"lupa: a device of somebody else's comes with no window; lupa presents only on a surface it made")
+
+	local device = borrowed
+	local instance
+
+	if not device then
+		instance = hood.Instance.new({
+			backend = backend,
+			flags = headless and { "headless" } or {},
+		})
+		local adapter = instance:requestAdapter({ powerPreference = "high-performance" })
+		device = adapter:requestDevice()
+	end
 
 	local surface, swapchain
 	local surfaceConfig = { presentMode = "immediate" }
@@ -386,8 +400,15 @@ function gpu.new(window, options)
 	local width, height = options.width or 800, options.height or 600
 	local frameCount = 1
 
+	if target then
+		width, height = target.width, target.height
+		-- safety: the pipeline is compiled against the format of what it draws into, so a target
+		-- that names one is what its passes are built for
+		format = target.format or format
+	end
+
 	if not headless then
-		surface = instance:createSurface(assert(window, "lupa: createSurface needs a window"))
+		surface = assert(instance):createSurface(assert(window, "lupa: createSurface needs a window"))
 		swapchain = surface:configure(device, surfaceConfig)
 		---@cast swapchain lupa.draw.Swapchain
 		format = swapchain.format or "rgba8unorm"
@@ -579,6 +600,7 @@ function gpu.new(window, options)
 		surfaceConfig = surfaceConfig,
 		window = window,
 		headless = headless,
+		targetView = target and target.view or nil,
 		targetWidth = width,
 		targetHeight = height,
 		frameCount = frameCount,

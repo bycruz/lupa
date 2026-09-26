@@ -18,13 +18,26 @@ local byteArray = ffi.typeof("uint8_t[?]")
 ---@field rows number? how many tiles a texture of a block is stacked into, so its smaller
 --- levels are filtered tile by tile rather than across the joins, defaults to 1
 
+--- A texture of somebody else's to draw into: what a game embedded in something that owns the
+--- window -- a UI library, another renderer -- is handed instead of a swapchain. Anything with
+--- these fields will do, and the pass the frame is drawn in is the caller's to sample afterwards.
+---@class lupa.Target
+---@field texture hood.Texture # What a frame is drawn into, which the caller samples
+---@field view hood.TextureView # And the view of it that pass is given
+---@field width number
+---@field height number
+---@field format hood.TextureFormat? # What its format is called, which its pipelines are built for
+
 ---@class lupa.DrawOptions
 ---@field headless boolean? draw without a window, onto an image that can be read back
 ---@field width number? size of the headless target, defaults to 800
 ---@field height number? size of the headless target, defaults to 600
+---@field device hood.Device? a device of somebody else's to draw with, which comes with no window
+---@field target lupa.Target? a texture of somebody else's to draw into instead of one of its own
 
 ---@class lupa.Draw: lupa.draw.Frame, lupa.draw.Model, lupa.draw.View
 ---@field headless boolean
+---@field targetView hood.TextureView? the texture of somebody else's a frame goes into, when there is one
 ---@field targetWidth number
 ---@field targetHeight number
 ---@field maxTextureWidth number

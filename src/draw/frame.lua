@@ -340,9 +340,14 @@ function methods.endFrame(self)
 		end
 	end
 
-	local capturing = self.headless or self.capturing
+	local capturing = self.capturing or (self.headless and self.targetView == nil)
 
-	if not self.headless then
+	if self.targetView then
+		-- safety: the frame goes into the texture it was handed, which is the whole of it: a
+		-- caller of its own draws that texture, samples it and shows it, and reading it back here
+		-- would be a copy nobody asked for
+		recordFrame(self, encoder, slot, self.targetView, width, height)
+	elseif not self.headless then
 		recordFrame(self, encoder, slot, texture:createView(self.emptyViewDesc), width, height)
 	end
 
