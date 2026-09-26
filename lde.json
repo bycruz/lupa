@@ -2,7 +2,7 @@
 	"name": "lupa",
 	"description": "A 2d/3d game creation framework for LuaJIT",
 	"authors": ["David Cruz <david@bycruz.dev>"],
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"dependencies": {
 		"hood": { "version": "0.2", "features": ["vk"] },
 		"winit": { "version": "0.1" },
