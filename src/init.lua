@@ -17,20 +17,25 @@ local Input = require("lupa.input")
 local lupa = {}
 
 ffi.cdef [[
-    struct timespec { long tv_sec; long tv_nsec; };
-    int clock_gettime(int clockid, struct timespec *tp);
+    typedef struct { long tv_sec; long tv_nsec; } LupaTimeSpec;
 ]]
 
 local CLOCK_MONOTONIC = 1
-local timespec = ffi.new("struct timespec")
+
+---@type ffi.ctype* LupaTimeSpec
+local timeSpecType = ffi.typeof("LupaTimeSpec")
+
+local timeSpec = timeSpecType()
+
+---@type ffi.ctype* int (*)(int, LupaTimeSpec *), for ffi.cast
+local clockGetTime = ffi.cast("int (*)(int, LupaTimeSpec *)", ffi.C.clock_gettime)
 
 --- safety: the wall clock rather than os.clock(), which counts the time the whole process
 --- has spent on a CPU, driver threads included
 ---@type fun(): number
 function lupa.now()
-	ffi.C.clock_gettime(CLOCK_MONOTONIC, timespec)
-	---@diagnostic disable-next-line: undefined-field -- the cdef above declares them
-	return tonumber(timespec.tv_sec) + tonumber(timespec.tv_nsec) * 1e-9
+	clockGetTime(CLOCK_MONOTONIC, timeSpec)
+	return tonumber(timeSpec.tv_sec) + tonumber(timeSpec.tv_nsec) * 1e-9
 end
 
 local MAX_DELTA = 0.1
