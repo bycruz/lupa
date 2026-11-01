@@ -195,7 +195,6 @@ screenIt("scene: a directional light casts a shadow", function()
 	end
 
 	---@param pixels tests.Pixels
-	---@return fun(worldX: number): number
 	local function brightnessAt(pixels)
 		local perUnit = 150 / (12 * math.tan(math.pi / 6))
 		return function(worldX)

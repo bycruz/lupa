@@ -4,6 +4,10 @@ local ffi = require("ffi")
 require("lupa.math")
 
 ffi.cdef [[
+    /* safety: lupa.math declares LupaMat4; LuaJIT accepts this forward form as the same
+       typedef, and lye reads each cdef block on its own */
+    typedef struct LupaMat4 LupaMat4;
+
     /* safety: the world matrix's fourth row is always (0, 0, 0, 1) and the shader puts
        it back rather than reading it, which is why this leaves it out */
     typedef struct {
@@ -173,15 +177,17 @@ local shadowTransformsType = ffi.typeof("LupaShadowTransforms")
 ---@diagnostic disable-next-line: assign-type-mismatch
 local lightingType = ffi.typeof("LupaLighting")
 
-return {
-	instanceStride = ffi.sizeof("LupaInstance"),
-	drawStride = ffi.sizeof("LupaDrawRecord"),
-	transformsSize = ffi.sizeof("LupaTransforms"),
-	shadowTransformsSize = ffi.sizeof("LupaShadowTransforms"),
-	lightingSize = ffi.sizeof("LupaLighting"),
+---@type lupa.draw.Records
+local records = {
+	instanceStride = assert(ffi.sizeof("LupaInstance")),
+	drawStride = assert(ffi.sizeof("LupaDrawRecord")),
+	transformsSize = assert(ffi.sizeof("LupaTransforms")),
+	shadowTransformsSize = assert(ffi.sizeof("LupaShadowTransforms")),
+	lightingSize = assert(ffi.sizeof("LupaLighting")),
 	newInstances = ffi.typeof("LupaInstance[?]"),
 	newDraws = ffi.typeof("LupaDrawRecord[?]"),
 	newTransforms = transformsType,
 	newShadowTransforms = shadowTransformsType,
 	newLighting = lightingType,
 }
+return records

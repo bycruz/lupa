@@ -5,13 +5,11 @@ local Assets = require("lupa.assets")
 local Draw = require("lupa.draw")
 local Input = require("lupa.input")
 
----@class lupa.RawApp<T>
----@field start fun(self: T, assets: lupa.Assets)
----@field update fun(self: T, dt: number, input: lupa.Input)
----@field draw fun(self: T, draw: lupa.Draw)
----@field quit fun(self: T)
-
----@alias lupa.App<T> lupa.RawApp<T> | T
+---@class lupa.App
+---@field start fun(self: lupa.App, assets: lupa.Assets)
+---@field update fun(self: lupa.App, dt: number, input: lupa.Input)
+---@field draw fun(self: lupa.App, draw: lupa.Draw)
+---@field quit fun(self: lupa.App)
 
 ---@class lupa
 local lupa = {}
@@ -41,12 +39,12 @@ end
 local MAX_DELTA = 0.1
 
 ---@class lupa.RunOptions: lupa.DrawOptions
+---@field headless boolean? draw without a window
 ---@field frames number? stop after this many frames; without it a headless run ends when App:quit() is called
 ---@field width number? size of the window a windowed run opens, defaults to 1200
 ---@field height number? defaults to 720
 
----@generic T
----@param app lupa.App<T>
+---@param app lupa.App
 ---@param options lupa.RunOptions?
 function lupa.run(app, options)
 	options = options or {}
@@ -108,7 +106,8 @@ function lupa.run(app, options)
 
 	local previous = lupa.now()
 
-	eventLoop:run(function(event, handler)
+	---@type winit.EventHandler
+	local function onEvent(event, handler)
 		handler:setMode("poll")
 
 		if not running then
@@ -142,7 +141,9 @@ function lupa.run(app, options)
 		elseif event.name == "windowClose" then
 			handler:exit()
 		end
-	end)
+	end
+
+	eventLoop:run(onEvent)
 end
 
 return lupa

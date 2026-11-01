@@ -2,7 +2,10 @@ local hood = require("hood")
 local ffi = require("ffi")
 
 local limits = require("lupa.draw.limits")
+---@type lupa.draw.Records
 local records = require("lupa.draw.records")
+
+local colorWrites = hood.ColorWrites
 
 local vertexShader = require("lupa.shaders.main.vert")
 local fragmentShader = require("lupa.shaders.main.frag")
@@ -80,7 +83,7 @@ function Uploads:write(buffer, size, data, offset)
 	if not self.encoder then
 		self.encoder = self.device:createCommandEncoder()
 	end
-	self.encoder:writeBuffer(buffer, size, data, offset)
+	assert(self.encoder):writeBuffer(buffer, size, data, offset)
 end
 
 function Uploads:flush()
@@ -118,7 +121,7 @@ end
 -- geometry into memory a frame still in flight is reading
 ---@type fun(device: hood.Device, instanceCapacity: number, drawCapacity: number): lupa.draw.Slot
 local function createSlot(device, instanceCapacity, drawCapacity)
-	return {
+	local slot = {
 		instanceBuffer = device:createBuffer({
 			size = records.instanceStride * instanceCapacity,
 			usages = { "VERTEX", "COPY_DST" },
@@ -161,6 +164,8 @@ local function createSlot(device, instanceCapacity, drawCapacity)
 		drawCapacity = drawCapacity,
 		uvScalesRevision = limits.uvScalesRevision,
 	}
+	---@cast slot lupa.draw.Slot
+	return slot
 end
 
 ---@type fun(device: hood.Device, width: number, height: number): hood.Texture, hood.TextureView
@@ -201,7 +206,6 @@ end
 ---@param sampler hood.Sampler
 ---@param buffers { transforms: hood.Buffer, lighting: hood.Buffer }
 ---@param slot lupa.draw.Slot
----@return hood.BindGroup
 local function createBindGroup(device, layout, shadow, textureView, sampler, buffers, slot)
 	return device:createBindGroup({
 		layout = layout,
@@ -249,7 +253,7 @@ local function createShadowTargets(device, size, cascades)
 		layers[index + 1] = map:createView({ baseArrayLayer = index, layerCount = 1 })
 	end
 
-	return {
+	local shadow = {
 		size = size,
 		cascades = cascades,
 		map = map,
@@ -269,6 +273,8 @@ local function createShadowTargets(device, size, cascades)
 			addressModeW = "clamp-to-edge",
 		}),
 	}
+	---@cast shadow lupa.draw.ShadowTargets
+	return shadow
 end
 
 -- safety: the maps clear to far, so a texel nothing was drawn into leaves what it covers
@@ -295,6 +301,8 @@ end
 --- safety: hood's Vulkan swapchain carries these two, the OpenGL one neither, which is
 --- why both are optional
 ---@class lupa.draw.Swapchain: hood.Swapchain
+---@field width number
+---@field height number
 ---@field imageCount number?
 ---@field format hood.TextureFormat?
 
@@ -421,12 +429,12 @@ function gpu.new(window, options)
 	-- safety: a vertex position is 16 bits of the mesh's own size and a uv is 16 bits of
 	-- its own range, and the two scales ride in the instance, so a mesh of any size keeps
 	-- a precision of its extent over 32767
-	local meshLayout = hood.VertexLayout.new({ stride = 16 })
+	local meshLayout = hood.VertexLayout.new({ stride = 16, stepMode = "vertex" })
 		:withAttribute({ type = "i16", size = 3, offset = 0, location = 0 })
 		:withAttribute({ type = "i8", size = 4, offset = 6, normalized = true, location = 2 })
 		:withAttribute({ type = "i16", size = 2, offset = 10, location = 1 })
 
-	local instanceLayout = hood.VertexLayout.new({ stride = records.instanceStride })
+	local instanceLayout = hood.VertexLayout.new({ stride = records.instanceStride, stepMode = "vertex" })
 		:withAttribute({ type = "f32", size = 3, offset = 0, location = 3 })
 		:withAttribute({ type = "f32", size = 3, offset = 12, location = 4 })
 		:withAttribute({ type = "f32", size = 3, offset = 24, location = 5 })
@@ -484,7 +492,7 @@ function gpu.new(window, options)
 		fragment = {
 			module = { type = shaderType, source = shadowFragmentShader },
 			targets = {
-				{ writeMask = hood.ColorWrites.All, format = "rgba8unorm" },
+				{ writeMask = colorWrites.All, format = "rgba8unorm" },
 			},
 		},
 		depthStencil = {
@@ -522,7 +530,7 @@ function gpu.new(window, options)
 				{
 					blend = "alpha-blending",
 					format = format,
-					writeMask = hood.ColorWrites.All,
+					writeMask = colorWrites.All,
 				},
 			},
 		},
@@ -544,7 +552,7 @@ function gpu.new(window, options)
 			targets = {
 				{
 					blend = "alpha-blending",
-					writeMask = hood.ColorWrites.All,
+					writeMask = colorWrites.All,
 					format = format,
 				},
 			},
@@ -556,17 +564,19 @@ function gpu.new(window, options)
 		},
 	})
 
----@type fun(slot: table): hood.BindGroup
+---@type fun(slot: lupa.draw.Slot): hood.BindGroup
 	local function bindGroupFor(slot)
 		return createBindGroup(device, bindGroupLayout, shadow, textureView, sampler,
 			{ transforms = slot.transformsBuffer, lighting = slot.lightingBuffer }, slot)
 	end
 
+	---@type fun(slot: lupa.draw.Slot): hood.BindGroup
 	local function overlayBindGroupFor(slot)
 		return createBindGroup(device, bindGroupLayout, shadow, textureView, sampler,
 			{ transforms = slot.overlayTransformsBuffer, lighting = slot.overlayLightingBuffer }, slot)
 	end
 
+	---@type fun(slot: lupa.draw.Slot, cascade: number): hood.BindGroup
 	local function shadowBindGroupFor(slot, cascade)
 		return createShadowBindGroup(device, shadowLayout, slot.shadowTransforms[cascade])
 	end
@@ -592,7 +602,7 @@ function gpu.new(window, options)
 
 	local depthBuffer, depthBufferView = createDepth(device, width, height)
 
-	return {
+	local result = {
 		device = device,
 		pipeline = pipeline,
 		surface = surface,
@@ -634,6 +644,8 @@ function gpu.new(window, options)
 		maxTextureWidth = limits.textureWidth,
 		maxTextureHeight = limits.textureHeight,
 	}
+	---@cast result lupa.draw.Gpu
+	return result
 end
 
 gpu.upload = upload

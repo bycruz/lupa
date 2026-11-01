@@ -85,13 +85,16 @@ function Mesh:update(vertices, indices, stride)
 		error(string.format("lupa: mesh vertices must be %d floats each; got %d", stride, #vertices))
 	end
 
+	local indexCount = 0
+	if indices then indexCount = #indices end
+
 	self.vertices = floatArray(#vertices, vertices)
 	self.indices = indices and intArray(#indices, indices) or noIndices
 	self.stride = stride
 	self.vertexCount = #vertices / stride
-	self.indexCount = indices and #indices or 0
+	self.indexCount = indexCount
 	self.vertexCapacity = #vertices
-	self.indexCapacity = indices and #indices or 0
+	self.indexCapacity = indexCount
 	self.changed = true
 end
 
@@ -118,7 +121,7 @@ function Mesh:updateFromData(vertices, vertexCount, indices, indexCount, stride)
 		ffi.copy(self.vertices, vertices, floats * 4)
 	end
 	if indexCount > 0 then
-		ffi.copy(self.indices, indices, indexCount * 4)
+		ffi.copy(self.indices, assert(indices, "lupa: index count without indices"), indexCount * 4)
 	end
 
 	self.stride = stride
@@ -142,7 +145,7 @@ end
 
 --- safety: a larger image would be rejected, and sampling a clipped one is worse
 --- than scaling it, so box-filter it down to a layer
----@type fun(w: number, h: number, pixels: ffi.cdata*, maxW: number, maxH: number): number, number, ffi.cdata*
+---@type fun(w: number, h: number, pixels: ffi.array<ffi.uint8_t>, maxW: number, maxH: number): number, number, ffi.array<ffi.uint8_t>
 local function fit(w, h, pixels, maxW, maxH)
 	if w <= maxW and h <= maxH then
 		return w, h, pixels
@@ -235,7 +238,7 @@ function Assets:obj(path)
 	return mesh
 end
 
----@type fun(self: lupa.Assets, width: number, height: number, pixels: ffi.cdata*, options: lupa.TextureOptions?): lupa.Texture
+---@type fun(self: lupa.Assets, width: number, height: number, pixels: ffi.array<ffi.uint8_t>, options: lupa.TextureOptions?): lupa.Texture
 function Assets:texture(width, height, pixels, options)
 	width, height, pixels = fit(width, height, pixels, self.draw.maxTextureWidth, self.draw.maxTextureHeight)
 	return Texture.new(self.draw:addTexture(width, height, pixels, options), width, height, options)

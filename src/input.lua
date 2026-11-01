@@ -8,9 +8,9 @@
 ---| string
 
 ---@class lupa.InputModifiers
----@field shift boolean
----@field ctrl boolean
----@field alt boolean
+---@field shift boolean?
+---@field ctrl boolean?
+---@field alt boolean?
 
 ---@alias lupa.Input.MouseButton
 ---| "left"

@@ -32,7 +32,7 @@ function M.new(width, height)
 		return nil, tostring(screenOrError)
 	end
 
-	---@type tests.Screen
+	---@cast screenOrError tests.Screen
 	return screenOrError
 end
 
@@ -55,13 +55,16 @@ function Screen:render(paint)
 	if not pixels then
 		error("lupa: the frame was not captured")
 	end
+	---@cast width number
+	---@cast height number
+	---@cast pixels string
 
 	-- safety: the capture comes back with rows from the top, so the flip happens
 	-- here once instead of in every test
 	return function(x, y)
 		local i = ((height - 1 - y) * width + x) * 4 + 1
-		return string.byte(pixels, i), string.byte(pixels, i + 1),
-			string.byte(pixels, i + 2), string.byte(pixels, i + 3)
+		return assert(string.byte(pixels, i)), assert(string.byte(pixels, i + 1)),
+			assert(string.byte(pixels, i + 2)), assert(string.byte(pixels, i + 3))
 	end
 end
 

@@ -1,7 +1,6 @@
 local test = require("lde-test")
 local Input = require("lupa.input")
 
----@return lupa.Input
 local function newInput()
 	return Input.new(nil)
 end

@@ -38,6 +38,7 @@ function M.parse(text)
 	local positionsSeen, texcoordsSeen, normalsSeen = 0, 0, 0
 
 	local vertices, indices = {}, {}
+	---@type table<string, number>
 	local corners = {}
 	local cornerCount, unique = 0, 0
 
@@ -55,7 +56,7 @@ function M.parse(text)
 
 		local existing = corners[key]
 		if existing then
-			return existing, vi
+			return assert(existing), vi
 		end
 
 		local p = (vi - 1) * 3
@@ -140,8 +141,10 @@ function M.parse(text)
 
 ---@type fun(rest: string)
 	local function readFace(rest)
+		---@type number?[][]
 		local face = {}
 		for corner in rest:gmatch("%S+") do
+			---@cast corner string
 			local vi, ti, ni = parseCorner(corner)
 			if vi then
 				face[#face + 1] = {
@@ -156,11 +159,11 @@ function M.parse(text)
 			return
 		end
 
-		local first, firstVi = emitCorner(face[1][1], face[1][2], face[1][3])
-		local prev, prevVi = emitCorner(face[2][1], face[2][2], face[2][3])
+		local first, firstVi = emitCorner(assert(face[1][1]), face[1][2], face[1][3])
+		local prev, prevVi = emitCorner(assert(face[2][1]), face[2][2], face[2][3])
 
 		for k = 3, #face do
-			local cur, curVi = emitCorner(face[k][1], face[k][2], face[k][3])
+			local cur, curVi = emitCorner(assert(face[k][1]), face[k][2], face[k][3])
 
 			if normalsSeen == 0 then
 				local nx, ny, nz = flatNormal((firstVi - 1) * 3, (prevVi - 1) * 3, (curVi - 1) * 3)

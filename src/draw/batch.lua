@@ -2,6 +2,7 @@ local ffi = require("ffi")
 
 local limits = require("lupa.draw.limits")
 local meshes = require("lupa.draw.meshes")
+---@type lupa.draw.Records
 local records = require("lupa.draw.records")
 
 -- safety: a vertex is 9 floats in and 16 bytes stored: a position in 16 bits of the
@@ -230,7 +231,9 @@ local MESH_HEADROOM = 1.25
 -- mesh keeps its offset, so growth only re-uploads
 ---@type fun(draw: lupa.Draw, vertexCapacity: number, indexCapacity: number)
 local function growArena(draw, vertexCapacity, indexCapacity)
-	local arena, device = draw.arena, draw.device
+	---@type lupa.draw.Arena
+	local arena = draw.arena
+	local device = draw.device
 
 	vertexCapacity = math.max(arena.vertexCapacity, vertexCapacity)
 	indexCapacity = math.max(arena.indexCapacity, indexCapacity)
@@ -327,6 +330,7 @@ local function release(free, offset, bytes)
 		return
 	end
 
+	---@type lupa.draw.Span
 	local span = { offset = offset, bytes = bytes }
 	local index = 1
 
@@ -438,8 +442,9 @@ local function reserveInstances(draw, count)
 		return
 	end
 
-	draw.instances, draw.instanceCapacity = growArray(draw.instances, draw.instanceCapacity,
+	local grown, capacity = growArray(draw.instances, draw.instanceCapacity,
 		draw.instanceCount + count, records.instanceStride, records.newInstances)
+	draw.instances, draw.instanceCapacity = grown, capacity
 end
 
 ---@type fun(draw: lupa.Draw, count: number)
@@ -448,8 +453,9 @@ local function reserveDraws(draw, count)
 		return
 	end
 
-	draw.drawRecords, draw.drawRecordCapacity = growArray(draw.drawRecords, draw.drawRecordCapacity,
+	local grown, capacity = growArray(draw.drawRecords, draw.drawRecordCapacity,
 		draw.drawRecordCount + count, records.drawStride, records.newDraws)
+	draw.drawRecords, draw.drawRecordCapacity = grown, capacity
 end
 
 ---@type fun(draw: lupa.Draw, mesh: lupa.Mesh): lupa.draw.Instance

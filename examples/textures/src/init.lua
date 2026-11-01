@@ -4,7 +4,19 @@ local ffi = require("ffi")
 
 local cos, sin, pi = math.cos, math.sin, math.pi
 
----@class TextureDemo: lupa.RawApp
+---@class TextureDemoCube
+---@field x number
+---@field y number
+---@field z number
+---@field size number
+---@field spin number
+
+---@class TextureDemo: lupa.App
+---@field time number
+---@field mode number
+---@field tex lupa.Texture
+---@field checker lupa.Texture
+---@field cubes TextureDemoCube[]
 local App = {}
 
 function App:start(assets)
@@ -43,7 +55,6 @@ function App:update(dt, input)
 	self.time = self.time + dt
 end
 
----@param draw lupa.Draw
 function App:draw(draw)
 	local t = self.time
 

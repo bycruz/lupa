@@ -57,13 +57,15 @@ local RECT_INDICES = ffi.new("int[6]", { 0, 1, 2, 1, 3, 2 })
 
 ---@type fun(vertices: ffi.cdata*, indices: ffi.cdata*, vertexCount: number, indexCount: number): lupa.Mesh
 local function meshOf(vertices, indices, vertexCount, indexCount)
-	return {
+	local mesh = {
 		vertices = vertices,
 		indices = indices,
 		stride = 8,
 		vertexCount = vertexCount,
 		indexCount = indexCount,
 	}
+	---@cast mesh lupa.Mesh
+	return mesh
 end
 
 ---@type table<number, lupa.Mesh>

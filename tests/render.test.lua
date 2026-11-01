@@ -345,8 +345,7 @@ end)
 
 screenIt("render: only what is drawn before endShadowCasters casts a shadow", function()
 	---@param limited boolean
-	---@return tests.Pixels
-	local function scene(limited)
+	local function shadowScene(limited)
 		return screen:render(function(d)
 			d:setOrtho()
 			d:clearTexture()
@@ -367,14 +366,13 @@ screenIt("render: only what is drawn before endShadowCasters casts a shadow", fu
 	end
 
 	---@param pixels tests.Pixels
-	---@return number
-	local function brightness(pixels)
+	local function averagePixel(pixels)
 		local r, g, b = pixels(200 + 30, 150)
 		return (r + g + b) / 3
 	end
 
-	local cast = brightness(scene(false))
-	local notCasting = brightness(scene(true))
+	local cast = averagePixel(shadowScene(false))
+	local notCasting = averagePixel(shadowScene(true))
 
 	test.less(cast, 60)
 	test.greater(notCasting, 150)
@@ -407,7 +405,6 @@ screenIt("render: a tiled vertex samples the tile it names, and repeats it", fun
 
 	--- A 10 pixel quad whose uv counts two tiles across and one down.
 	---@param tile number
-	---@return lupa.Mesh
 	local function quad(tile)
 		return Assets.new(draw):mesh({
 			0, 0, 0, 0, 0, 1, 0, 1, tile,
@@ -428,17 +425,16 @@ screenIt("render: a tiled vertex samples the tile it names, and repeats it", fun
 	end)
 
 	---@param x number
-	---@return number
-	local function brightness(x)
+	local function averageAtX(x)
 		local r, g, b = pixels(x, 55)
 		return (r + g + b) / 3
 	end
 
 	-- u runs 0 to 2 over the quad, so x = 51, 54 and 56 are a quarter, three quarters
 	-- and one and a quarter of the way across it
-	test.less(brightness(51), 60)
-	test.greater(brightness(54), 190)
-	test.less(brightness(56), 60)
+	test.less(averageAtX(51), 60)
+	test.greater(averageAtX(54), 190)
+	test.less(averageAtX(56), 60)
 end)
 
 screenIt("render: a merged face does not show a seam where its tile wraps", function()
@@ -553,14 +549,13 @@ screenIt("render: a point light is brightest under it and fades with distance", 
 	end)
 
 	---@param x number
-	---@return number
-	local function brightness(x)
+	local function averageAtPosition(x)
 		local r, g, b = pixels(x, 150)
 		return (r + g + b) / 3
 	end
 
-	local under = brightness(200)
-	local beside = brightness(300)
+	local under = averageAtPosition(200)
+	local beside = averageAtPosition(300)
 
 	test.greater(under, 150)
 	test.greater(beside, 40)
@@ -569,8 +564,7 @@ end)
 
 screenIt("render: a point light stops at its radius", function()
 	---@param lightRadius number
-	---@return tests.Pixels
-	local function scene(lightRadius)
+	local function lightRadiusScene(lightRadius)
 		return screen:render(function(d)
 			d:setOrtho()
 			d:setLighting({
@@ -585,8 +579,8 @@ screenIt("render: a point light stops at its radius", function()
 
 	-- the rect is at z = 0, so that pixel is 208 units from the light: inside a
 	-- radius of 400 and well outside one of 100
-	local wide = scene(400)
-	local narrow = scene(100)
+	local wide = lightRadiusScene(400)
+	local narrow = lightRadiusScene(100)
 
 	test.greater(wide(399, 150), 8)
 	expectAt(narrow, "past the edge of the light", 399, 150, 0, 0, 0)
@@ -750,11 +744,12 @@ screenIt("render: endShadowCasters can give each cascade its own share of the ca
 	end)
 
 	test.equal(screen.draw.shadowRecords, 3)
-	test.equal(screen.draw.casterCounts[1], 1)
-	test.equal(screen.draw.casterCounts[2], 2)
-	test.equal(screen.draw.casterCounts[3], 3)
+	local counts = assert(screen.draw.casterCounts)
+	test.equal(counts[1], 1)
+	test.equal(counts[2], 2)
+	test.equal(counts[3], 3)
 	-- a share larger than the list is the whole list
-	test.equal(screen.draw.casterCounts[4], 3)
+	test.equal(counts[4], 3)
 
 	-- safety: the counts that are refused are deliberately not numbers, so they are
 	-- written as a plain value rather than a table the checker can see
@@ -773,8 +768,7 @@ end)
 
 screenIt("render: a cascade that is given no casters leaves what it covers lit", function()
 	---@param counts number[]?
-	---@return tests.Pixels
-	local function scene(counts)
+	local function casterCountsScene(counts)
 		return screen:render(function(d)
 			d:setOrtho()
 			d:setCamera({ position = { 0, 3, 10 }, target = { 0, 0, 0 }, up = { 0, 1, 0 } })
@@ -790,14 +784,13 @@ screenIt("render: a cascade that is given no casters leaves what it covers lit",
 		end)
 	end
 
-	local casting = scene(nil)
-	local none = scene({ 0, 0, 0, 0 })
+	local casting = casterCountsScene(nil)
+	local none = casterCountsScene({ 0, 0, 0, 0 })
 
 	---@param pixels tests.Pixels
 	---@param x number
 	---@param y number
-	---@return number
-	local function brightness(pixels, x, y)
+	local function averageOfPixel(pixels, x, y)
 		local r, g, b = pixels(x, y)
 		return (r + g + b) / 3
 	end
@@ -807,8 +800,8 @@ screenIt("render: a cascade that is given no casters leaves what it covers lit",
 	for y = 100, 200 do
 		for x = 150, 250 do
 			--
-			local value = brightness(casting, x, y)
-			if value < brightness(none, x, y) - 20 then
+			local value = averageOfPixel(casting, x, y)
+			if value < averageOfPixel(none, x, y) - 20 then
 				dark = dark + 1
 			end
 		end
@@ -887,8 +880,7 @@ screenIt("render: a cut out texture leaves the half clear texels undrawn", funct
 	})
 
 	---@param cutout boolean
-	---@return tests.Pixels
-	local function scene(cutout)
+	local function cutoutScene(cutout)
 		return screen:render(function(d)
 			d:setOrtho()
 			d:clearLighting()
@@ -905,15 +897,14 @@ screenIt("render: a cut out texture leaves the half clear texels undrawn", funct
 	-- safety: the left column of the texture is opaque red and the right one is more
 	-- clear than not, and the samples sit on the middle of each column, where a bilinear
 	-- sample is the texel itself rather than a mix of the two
-	expectAt(scene(true), "the middle of the clear column, cut out", 300, 100, 1, 0, 0)
-	expectAt(scene(true), "the middle of the opaque column, cut out", 100, 100, 1, 0, 0)
-	expectAt(scene(false), "the middle of the clear column, blended", 300, 100, 1, 100 / 255, 100 / 255)
+	expectAt(cutoutScene(true), "the middle of the clear column, cut out", 300, 100, 1, 0, 0)
+	expectAt(cutoutScene(true), "the middle of the opaque column, cut out", 100, 100, 1, 0, 0)
+	expectAt(cutoutScene(false), "the middle of the clear column, blended", 300, 100, 1, 100 / 255, 100 / 255)
 end)
 
 screenIt("render: the far end of the view fades into the fog", function()
 	---@param far number how far away the fade is complete, 0 for none
-	---@return tests.Pixels
-	local function scene(far)
+	local function fogScene(far)
 		return screen:render(function(d)
 			d:setOrtho()
 			d:setCamera({ position = { 0, 10, 20 }, target = { 0, 0, -60 }, fov = math.pi / 3, near = 0.1, far = 400 })
@@ -930,8 +921,8 @@ screenIt("render: the far end of the view fades into the fog", function()
 
 	-- safety: the ground runs away from the camera, so the bottom of the frame is under
 	-- it and the horizon is far down it, and only the far end takes the colour of the fog
-	local plain = scene(0)
-	local fogged = scene(80)
+	local plain = fogScene(0)
+	local fogged = fogScene(80)
 
 	expectAt(fogged, "the ground under the camera", 200, 20, 1, 0, 0)
 

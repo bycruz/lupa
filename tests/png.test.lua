@@ -6,7 +6,6 @@ local test = require("lde-test")
 --- shows up as a difference rather than as the same value over and over.
 ---@param width number
 ---@param height number
----@return ffi.cdata*
 local function painted(width, height)
 	local pixels = ffi.new("uint8_t[?]", width * height * 4)
 	for index = 0, width * height * 4 - 1 do

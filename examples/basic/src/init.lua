@@ -29,6 +29,7 @@ local function hsl_plasma(h)
 	return hue_channel(h + 0.33333333), hue_channel(h), hue_channel(h - 0.33333333)
 end
 
+---@type fun(h: number, s: number, l: number): number, number, number
 local function hsl(h, s, l)
 	h = h % 1
 	if s == 0 then return l, l, l end
@@ -50,7 +51,18 @@ local function hsl(h, s, l)
 	return ch(h + 0.33333333), ch(h), ch(h - 0.33333333)
 end
 
----@type lupa.App<{ time: number, speed: number, mode: number, ball: table }>
+---@class BasicBall
+---@field x number
+---@field y number
+---@field vx number
+---@field vy number
+---@field size number
+
+---@class BasicApp: lupa.App
+---@field time number
+---@field speed number
+---@field mode number
+---@field ball BasicBall
 local App = {}
 
 function App:start()

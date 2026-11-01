@@ -1,6 +1,7 @@
 local gpu = require("lupa.draw.gpu")
 local lpmath = require("lupa.math")
 local limits = require("lupa.draw.limits")
+---@type lupa.draw.Records
 local records = require("lupa.draw.records")
 
 local eye = lpmath.vec3.new(0, 0, 0)
@@ -128,6 +129,8 @@ function methods.setCamera(self, t)
 	setVec3(up, t.up, 0, 1, 0)
 
 	local width, height = self:targetSize()
+	---@cast width number
+	---@cast height number
 	lpmath.mat4.lookAtInto(viewMatrix, eye, target, up)
 	lpmath.mat4.perspectiveInto(projMatrix, t.fov or math.pi / 3, width / height, t.near or 0.1, t.far or 1000)
 	lpmath.mat4.mulInto(self.transforms.viewProj, projMatrix, viewMatrix)
@@ -263,8 +266,14 @@ end
 
 -- safety: the box is fitted to the slice's bounding sphere rather than the slice, and its
 -- centre snapped to a whole texel, so the map's texels stay put as the camera moves
----@type fun(draw: lupa.Draw, index: number, near: number, far: number,
---- aspect: number, tangent: number, size: number, casterDepth: number): number
+---@param draw lupa.Draw
+---@param index number
+---@param near number
+---@param far number
+---@param aspect number
+---@param tangent number
+---@param size number
+---@param casterDepth number
 local function fitCascade(draw, index, near, far, aspect, tangent, size, casterDepth)
 	local middle = (near + far) * 0.5
 	local lateral = far * tangent * math.sqrt(1 + aspect * aspect)

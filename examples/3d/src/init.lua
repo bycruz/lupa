@@ -4,13 +4,25 @@ local lupa = require("lupa")
 local TAU = math.pi * 2
 local cos, sin, floor = math.cos, math.sin, math.floor
 
----@class Demo3D: lupa.RawApp
+---@class Demo3DCube
+---@field x number
+---@field y number
+---@field z number
+---@field size number
+---@field spin number
+---@field hue number
+
+---@class Demo3D: lupa.App
+---@field time number
+---@field mode number
+---@field torus lupa.Mesh
+---@field cubes Demo3DCube[]
 local App = {}
 
+---@type fun(h: number): number, number, number
 local function hsl(h)
 	h = (h % 1) * 6
 	local i = floor(h)
-	local f = h - i
 	local x = 1 - math.abs((h % 2) - 1)
 	local r, g, b
 	if i == 0 then r, g, b = 1, x, 0
@@ -54,7 +66,6 @@ function App:update(dt, input)
 	self.time = self.time + dt
 end
 
----@param draw lupa.Draw
 function App:draw(draw)
 	local t = self.time
 

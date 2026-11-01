@@ -1,6 +1,13 @@
 local test = require("lde-test")
 local lupa = require("lupa")
 
+---@param app tests.RunApp
+---@param options lupa.RunOptions?
+local function run(app, options)
+	---@diagnostic disable-next-line: type, assign-type-mismatch
+	lupa.run(app, options)
+end
+
 ---@class tests.RunApp
 ---@field frames number
 ---@field drew number
@@ -14,7 +21,6 @@ local lupa = require("lupa")
 local RunApp = {}
 RunApp.__index = RunApp
 
----@return tests.RunApp
 local function newApp()
 	local app = setmetatable({ frames = 0, drew = 0, started = false }, RunApp)
 
@@ -43,7 +49,7 @@ end
 test.it("run: a headless run draws the frames it was given", function()
 	local app = newApp()
 
-	lupa.run(app, { headless = true, width = 64, height = 64, frames = 3 })
+	run(app, { headless = true, width = 64, height = 64, frames = 3 })
 
 	test.truthy(app.started)
 	test.equal(app.frames, 3)
@@ -61,13 +67,14 @@ test.it("run: App:quit ends a headless run before the frame limit", function()
 		end
 	end
 
-	lupa.run(app, { headless = true, frames = 100 })
+	run(app, { headless = true, frames = 100 })
 
 	test.equal(app.frames, 2)
 end)
 
 test.it("run: every frame is given a non-negative delta", function()
 	local app = newApp()
+	---@type number[]
 	local deltas = {}
 
 ---@type fun(self: tests.RunApp, dt: number, input: lupa.Input)
@@ -75,7 +82,7 @@ test.it("run: every frame is given a non-negative delta", function()
 		deltas[#deltas + 1] = dt
 	end
 
-	lupa.run(app, { headless = true, frames = 3 })
+	run(app, { headless = true, frames = 3 })
 
 	test.equal(#deltas, 3)
 	for i = 1, #deltas do
@@ -101,7 +108,7 @@ test.it("run: input registered between frames reaches the next one", function()
 		end
 	end
 
-	lupa.run(app, { headless = true, frames = 3 })
+	run(app, { headless = true, frames = 3 })
 
 	test.equal(#seen, 3)
 	test.falsy(seen[1])
@@ -111,6 +118,6 @@ end)
 
 test.it("run: a missing callback is reported", function()
 	test.errors(function()
-		lupa.run({}, { headless = true, frames = 1 })
+		run({} --[[@as tests.RunApp]], { headless = true, frames = 1 })
 	end, "lupa: App:start(assets) is required")
 end)

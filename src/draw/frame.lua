@@ -2,10 +2,11 @@ local ffi = require("ffi")
 
 local batch = require("lupa.draw.batch")
 local gpu = require("lupa.draw.gpu")
+---@type lupa.draw.Records
 local records = require("lupa.draw.records")
 local view = require("lupa.draw.view")
 
----@type ffi.cdata* unsigned byte pointer ctype, cached for ffi.cast
+---@type ffi.ctype* unsigned byte pointer ctype, cached for ffi.cast
 local bytePointer = ffi.typeof("uint8_t*")
 
 ---@type fun(draw: lupa.Draw, width: number, height: number)
@@ -15,9 +16,9 @@ local function ensureCaptureTarget(draw, width, height)
 	end
 
 	if draw.captureTexture then
-		draw.captureView:destroy()
+		assert(draw.captureView):destroy()
 		draw.captureTexture:destroy()
-		draw.captureBuffer:destroy()
+		assert(draw.captureBuffer):destroy()
 	end
 
 	draw.captureWidth, draw.captureHeight = width, height
@@ -213,7 +214,7 @@ function methods.capturePixels(self)
 	-- safety: the copy has to finish before the buffer can be read
 	self.device.queue:waitIdle()
 
-	local buffer = self.captureBuffer
+	local buffer = assert(self.captureBuffer)
 	buffer:mapAsync()
 	local raw = ffi.cast(bytePointer, buffer:getMappedRange())
 	local pixels = ffi.string(raw, self.captureWidth * self.captureHeight * 4)
@@ -262,12 +263,15 @@ function methods.targetSize(self)
 		return self.targetWidth, self.targetHeight
 	end
 
-	return self.window.width, self.window.height
+	local window = assert(self.window, "lupa: a windowed frame needs a window")
+	return window.width, window.height
 end
 
 ---@type fun(self: lupa.Draw)
 function methods.endFrame(self)
 	local width, height = self:targetSize()
+	---@cast width number
+	---@cast height number
 	view.refreshProjection(self, width, height)
 
 	local texture
@@ -293,7 +297,8 @@ function methods.endFrame(self)
 		slot = self.frames[self.swapchain.currentFrame or 1] or self.frames[1]
 	end
 
-	local encoder = self.headless and self.device:createCommandEncoder() or self.swapchain:createCommandEncoder()
+	local encoder = self.headless and self.device:createCommandEncoder()
+		or assert(self.swapchain):createCommandEncoder()
 
 	self.sceneRecords = self.overlayStart and self.overlayStart.records or self.drawRecordCount
 
@@ -303,12 +308,20 @@ function methods.endFrame(self)
 
 	if self.overlayStart then
 		view.refreshOverlay(self, width, height)
-		encoder:writeBuffer(slot.overlayTransformsBuffer, records.transformsSize, self.overlayTransforms)
-		encoder:writeBuffer(slot.overlayLightingBuffer, records.lightingSize, self.overlayLighting)
+		local overlayTransforms = self.overlayTransforms
+		local overlayLighting = self.overlayLighting
+		---@cast overlayTransforms ffi.cdata*
+		---@cast overlayLighting ffi.cdata*
+		encoder:writeBuffer(slot.overlayTransformsBuffer, records.transformsSize, overlayTransforms)
+		encoder:writeBuffer(slot.overlayLightingBuffer, records.lightingSize, overlayLighting)
 	end
 
-	encoder:writeBuffer(slot.transformsBuffer, records.transformsSize, self.transforms)
-	encoder:writeBuffer(slot.lightingBuffer, records.lightingSize, self.lighting)
+	local transforms = self.transforms
+	local lighting = self.lighting
+	---@cast transforms ffi.cdata*
+	---@cast lighting ffi.cdata*
+	encoder:writeBuffer(slot.transformsBuffer, records.transformsSize, transforms)
+	encoder:writeBuffer(slot.lightingBuffer, records.lightingSize, lighting)
 	if self.instanceCount > 0 then
 		encoder:writeBuffer(slot.instanceBuffer, records.instanceStride * self.instanceCount, self.instances)
 		encoder:writeBuffer(slot.indirectBuffer, records.drawStride * self.drawRecordCount, self.drawRecords)

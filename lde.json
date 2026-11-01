@@ -2,11 +2,14 @@
 	"name": "lupa",
 	"description": "A 2d/3d game creation framework for LuaJIT",
 	"authors": ["David Cruz <david@bycruz.dev>"],
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"dependencies": {
 		"hood": { "version": "0.2", "features": ["vk"] },
 		"winit": { "version": "0.1" },
 		"glapi": { "version": "0.1" },
 		"vkapi": { "version": "0.1" }
+	},
+	"devDependencies": {
+		"lde-test": { "git": "https://github.com/lde-org/lde" }
 	}
 }

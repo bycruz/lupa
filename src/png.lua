@@ -76,6 +76,7 @@ end
 ---@type fun(s: string, i: number): number
 local function u32(s, i)
 	local a, b, c, d = s:byte(i, i + 3)
+	a, b, c, d = assert(a), assert(b), assert(c), assert(d)
 	return a * 16777216 + b * 65536 + c * 256 + d
 end
 
@@ -91,7 +92,7 @@ local function paeth(a, b, c)
 	return c
 end
 
----@type fun(raw: ffi.cdata*, height: number, stride: number, bpp: number)
+---@type fun(raw: ffi.array<ffi.uint8_t>, height: number, stride: number, bpp: number)
 local function unfilter(raw, height, stride, bpp)
 	local pitch = stride + 1
 	for y = 0, height - 1 do
@@ -131,13 +132,25 @@ local function unfilter(raw, height, stride, bpp)
 	end
 end
 
----@type fun(data: string): number, number, ffi.cdata*
+---@param data string
+---@return number width
+---@return number height
+---@return ffi.array<ffi.uint8_t> pixels
 function M.decode(data)
 	if #data < 8 or data:sub(1, 8) ~= PNG_SIGNATURE then
 		error("not a PNG file (bad signature)")
 	end
 
-	local width, height, bitDepth, colorType, interlace
+	---@type number?
+	local width
+	---@type number?
+	local height
+	---@type number?
+	local bitDepth
+	---@type number?
+	local colorType
+	---@type number?
+	local interlace
 	local palette, paletteLen = nil, 0
 	local paletteAlpha = nil
 	local idat = {}
@@ -171,6 +184,7 @@ function M.decode(data)
 	if not width then
 		error("PNG has no IHDR chunk")
 	end
+	assert(height, "PNG has no height in its IHDR chunk")
 	if interlace ~= 0 then
 		error("interlaced PNGs are not supported")
 	end
@@ -254,7 +268,7 @@ end
 --- safety: this is what the loader reads, so what it writes and what it reads are one
 --- format rather than two that agree today: 8 bits a channel, no interlacing, and one
 --- filter of none per row
----@type fun(width: number, height: number, pixels: ffi.cdata*): string
+---@type fun(width: number, height: number, pixels: ffi.array<ffi.uint8_t>): string
 function M.encode(width, height, pixels)
 	local stride = width * 4
 	local raw = byteArray(height * (stride + 1))

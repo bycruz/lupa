@@ -118,6 +118,10 @@ local byteArray = ffi.typeof("uint8_t[?]")
 ---@field captureBuffer hood.Buffer|false
 ---@field captureWidth number
 ---@field captureHeight number
+---@field warnedShadowCasters boolean?
+---@field new fun(window: winit.Window?, options: lupa.DrawOptions?): lupa.Draw
+---@field clearLighting fun(self: lupa.Draw)
+---@diagnostic disable-next-line: type, assign-type-mismatch
 local Draw = {}
 Draw.__index = Draw
 
@@ -188,6 +192,7 @@ function Draw.new(window, options)
 
 	-- safety: a frame starts with no lights rather than whatever the last one left, and
 	-- the same goes for the overlay's own lighting
+	---@cast draw lupa.Draw
 	Draw.clearLighting(draw)
 
 	draw.capturing = false
@@ -203,7 +208,8 @@ end
 
 ---@type fun(self: lupa.Draw, r: number, g: number, b: number, a: number?)
 function Draw:setColor(r, g, b, a)
-	self.curR, self.curG, self.curB, self.curA = r, g, b, a or 1
+	local alpha = a or 1
+	self.curR, self.curG, self.curB, self.curA = r, g, b, alpha
 end
 
 ---@type fun(self: lupa.Draw, x: number, y: number, w: number, h: number)
@@ -260,6 +266,7 @@ function Draw:setTexture(texture)
 	self.texU0, self.texV0, self.texU1, self.texV1 = 0, 0, 1, 1
 end
 
+---@type fun(self: lupa.Draw)
 function Draw:clearTexture()
 	self.curTexture = -1
 	self.texU0, self.texV0, self.texU1, self.texV1 = 0, 0, 1, 1
@@ -272,7 +279,10 @@ end
 
 ---@type fun(self: lupa.Draw, r: number, g: number, b: number)
 function Draw:setClearColor(r, g, b)
-	local color = self.renderDesc.colorAttachments[1].op.color
+	local attachment = self.renderDesc.colorAttachments[1]
+	local op = attachment.op
+	---@cast op { type: "clear", color: hood.Color }
+	local color = op.color
 	color.r, color.g, color.b = r, g, b
 end
 
@@ -285,7 +295,7 @@ end
 --- within the row it belongs to and never across the join between two tiles. Filtering
 --- across it would make far away blocks average towards the colour of all their faces at
 --- once, which reads as the world changing colour with distance
----@type fun(source: ffi.cdata*, width: number, height: number, rows: number, into: ffi.cdata*): number, number
+---@type fun(source: ffi.array<ffi.uint8_t>, width: number, height: number, rows: number, into: ffi.array<ffi.uint8_t>): number, number
 local function halve(source, width, height, rows, into)
 	local nextWidth, nextHeight = math.max(1, math.floor(width / 2)), math.max(1, math.floor(height / 2))
 	local rowHeight = height / rows
@@ -317,7 +327,7 @@ local function halve(source, width, height, rows, into)
 	return nextWidth, nextHeight
 end
 
----@type fun(self: lupa.Draw, width: number, height: number, pixels: ffi.cdata*, options: lupa.TextureOptions?): number
+---@type fun(self: lupa.Draw, width: number, height: number, pixels: ffi.array<ffi.uint8_t>, options: lupa.TextureOptions?): number
 function Draw:addTexture(width, height, pixels, options)
 	local layer = self.textureLayers
 	assert(layer < limits.textures, "lupa: texture array is full")
@@ -327,12 +337,14 @@ function Draw:addTexture(width, height, pixels, options)
 	end
 
 	self.textureLayers = layer + 1
+	local texels = pixels
+	---@cast texels ffi.cdata*
 	self.device.queue:writeTexture(self.texture, {
 		width = width,
 		height = height,
 		layer = layer,
 		bytesPerRow = width * 4,
-	}, pixels)
+	}, texels)
 
 	-- safety: the levels below the largest one are built here rather than by a blit,
 	-- because hood has no blit and because a level that covers a whole tile is what
@@ -362,10 +374,12 @@ function Draw:addTexture(width, height, pixels, options)
 	-- safety: the image sits in the corner of a full-size layer, so a sample at UV 1
 	-- would otherwise land outside it
 	local slot = layer * limits.uvScaleFloats
-	self.uvScales[slot] = width / limits.textureWidth
-	self.uvScales[slot + 1] = height / limits.textureHeight
-	self.uvScales[slot + 2] = options and options.emission or 0
-	self.uvScales[slot + 3] = options and options.cutout and 1 or 0
+	local uvScales = self.uvScales
+	---@cast uvScales ffi.array<ffi.float>
+	uvScales[slot] = width / limits.textureWidth
+	uvScales[slot + 1] = height / limits.textureHeight
+	uvScales[slot + 2] = options and options.emission or 0
+	uvScales[slot + 3] = options and options.cutout and 1 or 0
 	self.uvScalesRevision = self.uvScalesRevision + 1
 
 	return layer
